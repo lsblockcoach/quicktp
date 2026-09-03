@@ -1,78 +1,386 @@
 package com.example.quicktp;
 
+import com.mojang.blaze3d.platform.InputConstants;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.fabricmc.api.ClientModInitializer;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+import net.minecraft.client.KeyMapping;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayDeque;
+
 /**
- * QuickTP —— 纯客户端传送 MOD
+ * QuickTP 精简版 —— 纯客户端传送
  *
- * 原理：原版服务器的玩家位置是"客户端权威"的。客户端直接向服务器发送
- * ServerboundMovePlayerPacket.Pos（位置同步包），服务器就会把玩家放到该坐标。
- * 整个过程只用到客户端自己的网络连接，不需要任何服务器端权限。
+ * 服务器规则（26.1.2 源码验证）：
+ *  - 每 tick 最多 5 个移动包，总位移² ≤ 100×n → 极限 ≈22.2 格/tick
+ *  - 包内 onGround 直接结算摔落 → 全程 onGround=true + 微降 0.05
+ *  - 目标区块未加载时摔落结算豁免（直射唯一安全通道）
+ *  - playerMovementCheck 关闭时移动检查整体跳过（直射瞬间生效）
  *
- * 用法：/tp <x> <y> <z>   （支持 ~ 相对坐标，例如 /tp ~ 100 ~-50）
+ * 流程（两种模式，没有更多）：
+ *  A. 直射：单包射向目标 → 8tick 内被弹回→走B；没弹回→落地验证（区块信号）
+ *  B. 冲刺：每 tick 5包×4.44格，爬升380→高空微降斜线→碎步下降→立稳
+ *     永不触发服务器弹回，是最慢也是最快的稳定方案（447格/s，原版上限）
  */
 public class QuickTp implements ClientModInitializer {
 
+    private static final int MODE_IDLE = 0;
+    private static final int MODE_PROBE = 1;    // 直射（单包直达，仅用于目标区块未加载时）
+    private static final int MODE_SPRINT = 2;   // 冲刺（自选步长·保底）
+    private static final int MODE_LANDING = 3;  // 落地验证+立稳
+    private static final int MODE_ELYTRA = 4;   // 鞘翅触发等待
+
+    private static final int PKT = 5;                    // 每tick 5包
+    private static final double STEP = 4.44;             // 普通模式水平步长（鞘翅用 7.7）
+    private static final double DESCEND_STEP = 3.9;      // 下降步长（伤害=floor(3.9-3)=0）
+    private static final double CRUISE_Y = 380.0;        // 巡航高度
+    private static final double PROBE_WAIT = 8;          // 直射观察窗口（tick）
+
+    private static int mode = MODE_IDLE;
+    private static int timer = 0;                // 通用计时
+    private static boolean elytraEligible = false; // 客户端预检：穿了鞘翅
+    private static boolean elytraActive = false;   // 服务器已确认滑翔（可提速）
+    private static int flyTimer = 0;               // 飞行中重发滑翔触发包计时
+    private static int bounce = 0;                 // 连续弹回计数（触发偏移绕行）
+    private static final ArrayDeque<double[]> QUEUE = new ArrayDeque<>();
+    private static double[] target = null;       // 目标{x,y,z}
+    private static double[] lastSent = null;
+
+    private static boolean noFall = true;
+
+    private static final KeyMapping STOP_KEY = KeyMappingHelper.registerKeyMapping(
+            new KeyMapping("key.quicktp.stop",
+                    InputConstants.Type.KEYSYM,
+                    org.lwjgl.glfw.GLFW.GLFW_KEY_F12,
+                    new KeyMapping.Category(Identifier.fromNamespaceAndPath("quicktp", "main"))));
+
     @Override
     public void onInitializeClient() {
-        // Fabric 客户端命令：只在客户端本地注册，不会发给服务器，
-        // 与 Meteor 的 "." 命令系统互不相干，也不占用服务器原版 /tp。
-        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
-                dispatcher.register(ClientCommands.literal("tp")
-                        .then(ClientCommands.argument("x", StringArgumentType.word())
-                        .then(ClientCommands.argument("y", StringArgumentType.word())
-                        .then(ClientCommands.argument("z", StringArgumentType.word())
-                                .executes(ctx -> teleport(
-                                        ctx.getSource(),
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+            dispatcher.register(ClientCommands.literal("tpnofall")
+                    .executes(ctx -> {
+                        noFall = !noFall;
+                        ctx.getSource().sendFeedback(Component.literal(
+                                "§a[QuickTP] §fNoFall 已" + (noFall ? "§a开启" : "§c关闭")));
+                        return 1;
+                    }));
+            dispatcher.register(ClientCommands.literal("tp")
+                    .then(ClientCommands.argument("x", StringArgumentType.word())
+                    .then(ClientCommands.argument("y", StringArgumentType.word())
+                    .then(ClientCommands.argument("z", StringArgumentType.word())
+                            .executes(ctx -> {
+                                LocalPlayer p = ctx.getSource().getPlayer();
+                                return p == null ? 0 : start(ctx.getSource(), p,
                                         StringArgumentType.getString(ctx, "x"),
                                         StringArgumentType.getString(ctx, "y"),
-                                        StringArgumentType.getString(ctx, "z")
-                                ))))))
-        );
+                                        StringArgumentType.getString(ctx, "z"));
+                            })))));
+        });
+        ClientTickEvents.END_CLIENT_TICK.register(client -> tick());
     }
 
-    private static int teleport(FabricClientCommandSource source, String xs, String ys, String zs) {
-        LocalPlayer player = source.getPlayer();
-        if (player == null || player.connection == null) {
-            return 0;
-        }
-
-        double x, y, z;
+    // ============================================================ 开始
+    private static int start(FabricClientCommandSource src, LocalPlayer p, String xs, String ys, String zs) {
+        final double tx, ty, tz;
         try {
-            x = parseCoord(xs, player.getX());
-            y = parseCoord(ys, player.getY());
-            z = parseCoord(zs, player.getZ());
+            tx = parse(xs, p.getX());
+            ty = parse(ys, p.getY());
+            tz = parse(zs, p.getZ());
         } catch (NumberFormatException e) {
-            source.sendError(Component.literal("§c[QuickTP] §f坐标格式错误！示例: /tp 100 64 -200 或 /tp ~ ~10 ~"));
+            src.sendError(Component.literal("§c[QuickTP] §f坐标格式错误！示例: /tp 100 64 -200 或 /tp ~ ~10 ~"));
             return 0;
         }
 
-        // 1. 直接发送位置包 —— 这是真正的传送（超快，单包直达）
-        player.connection.send(new ServerboundMovePlayerPacket.Pos(x, y, z, true, false));
+        // 落点：目标低于地表→修正到地表+1；半空→落到地表（防摔统一处理）
+        double landY = ty;
+        double sy = surfaceY(tx, tz);
+        String hint = "";
+        if (sy > 1 && (ty < sy || ty > sy + 2)) {
+            landY = sy + 1;
+            hint = ty < sy ? " §7(地下目标→落至地表)" : " §7(半空目标→落至地表)";
+        }
 
-        // 2. 同步客户端本地位置并清零速度，防止客户端预测导致回弹/漂移
-        player.absSnapTo(x, y, z, player.getYRot(), player.getXRot());
-        player.setDeltaMovement(Vec3.ZERO);
+        target = new double[]{tx, landY, tz};
+        reset();
+        bounce = 0;
 
-        source.sendFeedback(Component.literal(
-                String.format("§a[QuickTP] §f已传送到 §e%.1f, %.1f, %.1f", x, y, z)));
+        // 预检鞘翅（提速档位提示）
+        elytraEligible = p.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA);
+        elytraActive = false;
+        flyTimer = 0;
+
+        double dist = Math.sqrt(sq(tx - p.getX()) + sq(ty - p.getY()) + sq(tz - p.getZ()));
+
+        if (!chunkLoaded(tx, tz)) {
+            // ===== 目标区块未加载 → 【直射】单包直达 =====
+            // 未加载区块豁免摔落结算（touchingUnloadedChunk→return），直射唯一安全通道；
+            // 成功信号=目标区块被服务器送达客户端（大跳/直射被接受才会发生）。
+            mode = MODE_PROBE;
+            timer = 0;
+            lastSent = target;
+            p.connection.send(new ServerboundMovePlayerPacket.Pos(tx, landY, tz, true, false));
+            src.sendFeedback(Component.literal(String.format(
+                    "§a[QuickTP] §f直射！ §7(%.0f格)%s §8[F12取消]",
+                    dist, elytraEligible ? " §a(鞘翅已备)" : "")));
+            return 1;
+        }
+
+        // ===== 目标区块已加载 → 直射必摔（fallDistance 结算）→ 冲刺模式 =====
+        mode = MODE_SPRINT;
+        planSprint(p.getX(), p.getY(), p.getZ(), 4.44);
+        src.sendFeedback(Component.literal(String.format(
+                "§e[QuickTP] §f已加载区域 §7→ 冲刺模式(447格/s) %.0f格%s §8[F12取消]",
+                dist, elytraEligible ? " §a(鞘翅可提速)" : "")));
         return 1;
     }
 
-    /** 支持 "~"、 "~5"、 "-123.4" 三种写法 */
-    private static double parseCoord(String input, double current) {
-        if (input.startsWith("~")) {
-            String rest = input.substring(1);
-            return rest.isEmpty() ? current : current + Double.parseDouble(rest);
+    private static void reset() {
+        QUEUE.clear();
+        lastSent = null;
+        timer = 0;
+    }
+
+    // ============================================================ 主循环
+    private static void tick() {
+        LocalPlayer p = Minecraft.getInstance().player;
+        if (p == null || p.connection == null || p.isDeadOrDying()) {
+            reset();
+            mode = MODE_IDLE;
+            target = null;
+            return;
         }
-        return Double.parseDouble(input);
+
+        while (STOP_KEY.consumeClick()) {
+            if (mode != MODE_IDLE) {
+                reset();
+                mode = MODE_IDLE;
+                target = null;
+                p.sendSystemMessage(Component.literal("§c[QuickTP] §f传送已取消（F12）"));
+            }
+            return;
+        }
+
+        if (mode == MODE_IDLE) {
+            if (noFall) tickNoFall(p);
+            return;
+        }
+
+        // ---------- A. 直射（单包，仅用于目标区块未加载时） ----------
+        if (mode == MODE_PROBE) {
+            if (++timer > 8) {      // 8tick 后进入落地验证（区块信号判定成败）
+                mode = MODE_LANDING;
+                timer = 0;
+            }
+            return;
+        }
+
+        // ---------- C. 落地验证 + 立稳（成败=目标区块是否到来） ----------
+        if (mode == MODE_LANDING) {
+            double sy = surfaceY(target[0], target[2]);
+            boolean got = sy > 1 && chunkLoaded(target[0], target[2]);
+            if (!got && ++timer > 60) {
+                // 区块一直没来 = 直射被弹回（服务器有移动检查）→ 降级冲刺保底
+                p.sendSystemMessage(Component.literal(
+                        "§c[QuickTP] §f直射被拦截 → 冲刺模式(447格/s)"));
+                mode = MODE_SPRINT;
+                timer = 0;
+                lastSent = null;
+                QUEUE.clear();
+                planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
+                return;
+            }
+            if (sy > 1) target[1] = sy + 1;      // 区块生成后钉到真实地表
+            for (int i = 0; i < 2; i++) {         // 立稳：onGround=true 定位包（摔落清零）
+                p.connection.send(new ServerboundMovePlayerPacket.Pos(
+                        target[0], target[1], target[2], true, false));
+            }
+            p.absSnapTo(target[0], target[1], target[2], p.getYRot(), p.getXRot());
+            p.setDeltaMovement(Vec3.ZERO);
+            lastSent = null;
+            if (got && ++timer > 12) {            // 区块到位后立稳 12tick 收尾
+                mode = MODE_IDLE;
+                p.sendSystemMessage(Component.literal(String.format(
+                        "§a[QuickTP] §f已传送到 §e%.1f, %.1f, %.1f",
+                        target[0], target[1], target[2])));
+                target = null;
+            }
+            return;
+        }
+
+        // ---------- B. 冲刺（永不弹回的主体） ----------
+        if (mode == MODE_SPRINT) {
+            // 鞘翅确认：飞行中每 3 秒重发触发包，一旦服务器确认立即提速
+            if (elytraEligible && !elytraActive) {
+                if (++flyTimer % 60 == 1) {
+                    p.connection.send(new ServerboundPlayerCommandPacket(p,
+                            ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+                }
+                if (p.isFallFlying()) {
+                    elytraActive = true;
+                    reset();
+                    planSprint(p.getX(), p.getY(), p.getZ(), 7.7);
+                    p.sendSystemMessage(Component.literal(
+                            "§a[QuickTP] §f鞘翅滑翔已确认！§7提速至 774格/s"));
+                }
+            }
+
+            if (QUEUE.isEmpty()) {
+                mode = MODE_LANDING;   // 走立稳收尾
+                timer = 0;
+                return;
+            }
+            if (lastSent == null) lastSent = anchor(p);
+            for (int i = 0; i < PKT && !QUEUE.isEmpty(); i++) {
+                double[] pt = QUEUE.peekFirst();
+                // 下降碎步门控：目标区块未生成→锚定等待（钉住防摔，绝不坠落）。
+                // 不限超时！区块迟早生成；等待期间持续锚定（onGround=true+微降 →
+                // 不摔不死不被踢），每 5 秒提示一次，F12 随时手动取消。
+                if (pt[1] < lastSent[1] && !chunkLoaded(pt[0], pt[2])) {
+                    timer++;
+                    if (timer % 100 == 1) {
+                        p.sendSystemMessage(Component.literal(String.format(
+                                "§7[QuickTP] §f仍在等待区块生成... §e%.0f, %.0f §8(已等%ds · F12取消)",
+                                pt[0], pt[2], timer / 20)));
+                    }
+                    double ay = lastSent[1] - 0.05;
+                    p.connection.send(new ServerboundMovePlayerPacket.Pos(lastSent[0], ay, lastSent[2], true, false));
+                    p.absSnapTo(lastSent[0], ay, lastSent[2], p.getYRot(), p.getXRot());
+                    p.setDeltaMovement(Vec3.ZERO);
+                    return;
+                }
+                // 弹回保险 + 偏移绕行（解决起飞/降落路径被墙挡时的死循环）
+                if (dist3(p.getX(), p.getY(), p.getZ(), lastSent[0], lastSent[1], lastSent[2]) > 26.0) {
+                    bounce++;
+                    if (bounce > 60) {
+                        // 持续重试全是弹回 = 起飞点被完全堵死，别再死磕
+                        reset();
+                        mode = MODE_IDLE;
+                        target = null;
+                        p.sendSystemMessage(Component.literal(
+                                "§c[QuickTP] §f起飞点被地形完全堵死，请移动几格后重试"));
+                        return;
+                    }
+                    if (bounce > 4) {
+                        // 连续受阻：起飞点水平偏移（东/南/西/北轮换、距离递增8格）
+                        int k = bounce - 4;
+                        double ox = (k % 4 == 0) ? 8.0 * (k / 4 + 1) : (k % 4 == 1) ? -8.0 * (k / 4 + 1) : 0;
+                        double oz = (k % 4 == 2) ? 8.0 * (k / 4 + 1) : (k % 4 == 3) ? -8.0 * (k / 4 + 1) : 0;
+                        planSprint(p.getX() + ox, p.getY(), p.getZ() + oz, elytraActive ? 7.7 : 4.44);
+                        // 提示节流：每 4 次弹回才提醒一次，防止刷屏
+                        if (bounce % 4 == 1) {
+                            p.sendSystemMessage(Component.literal(
+                                    "§e[QuickTP] §f路径受阻，偏移绕行... §7(第" + (bounce - 4) + "次)"));
+                        }
+                    } else {
+                        planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
+                    }
+                    lastSent = null;   // ← 关键修复：重置锚点，避免下一tick重复误判弹回刷屏
+                    return;
+                }
+                lastSent = QUEUE.pollFirst();
+                p.connection.send(new ServerboundMovePlayerPacket.Pos(lastSent[0], lastSent[1], lastSent[2], true, false));
+            }
+            p.absSnapTo(lastSent[0], lastSent[1], lastSent[2], p.getYRot(), p.getXRot());
+            p.setDeltaMovement(Vec3.ZERO);
+            bounce = 0;
+        }
+    }
+
+    // ============================================================ 路径
+    private static void planSprint(double px, double py, double pz, double stepLen) {
+        QUEUE.clear();
+        timer = 0;
+        double tx = target[0], ty = target[1], tz = target[2];
+        double cruiseY = Math.max(Math.max(py, CRUISE_Y), ty) + 8.0;
+        segment(px, py, pz, px, cruiseY, pz, stepLen);           // 爬升
+        segment(px, cruiseY, pz, tx, cruiseY - 0.001, tz, stepLen); // 巡航微降斜线
+        segment(tx, cruiseY, tz, tx, ty, tz, stepLen);           // 下降（内部自动用3.9碎步）
+        timer = 0;
+    }
+
+    /** 路径点：水平步长可调；下降固定 3.9 碎步；巡航点微降防悬空标记 */
+    private static void segment(double x1, double y1, double z1, double x2, double y2, double z2, double stepLen) {
+        double dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
+        double d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < 0.01) return;
+        boolean desc = y2 < y1 - 0.01;
+        stepLen = desc ? DESCEND_STEP : stepLen;
+        int steps = Math.max(1, (int) Math.ceil(d / stepLen));
+        for (int i = 1; i <= steps; i++) {
+            double t = (double) i / steps;
+            QUEUE.add(new double[]{
+                    (i == steps) ? x2 : x1 + dx * t,
+                    (i == steps) ? y2 : y1 + dy * t - ((desc || i == steps) ? 0 : 0.05 * i),
+                    (i == steps) ? z2 : z1 + dz * t});
+        }
+    }
+
+    // ============================================================ 工具
+    private static double[] anchor(LocalPlayer p) {
+        return new double[]{p.getX(), p.getY(), p.getZ()};
+    }
+
+    private static void tickNoFall(LocalPlayer p) {
+        if (p.isDeadOrDying() || p.isSpectator() || p.getAbilities().mayfly) return;
+        if (p.fallDistance > 2.0F && p.getDeltaMovement().y < 0) {
+            p.connection.send(new ServerboundMovePlayerPacket.Pos(p.getX(), p.getY() - 0.05, p.getZ(), true, false));
+        }
+    }
+
+    private static double surfaceY(double x, double z) {
+        try {
+            ClientLevel l = Minecraft.getInstance().level;
+            if (l == null) return -1;
+            int bx = (int) Math.floor(x), bz = (int) Math.floor(z);
+            ChunkAccess c = l.getChunkSource().getChunk(bx >> 4, bz >> 4, ChunkStatus.FULL, false);
+            if (c == null) return -1;
+            return c.getHeight(Heightmap.Types.WORLD_SURFACE, bx & 15, bz & 15) + 1;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    private static boolean chunkLoaded(double x, double z) {
+        try {
+            ClientLevel l = Minecraft.getInstance().level;
+            if (l == null) return false;
+            return l.getChunkSource().getChunk((int) Math.floor(x) >> 4, (int) Math.floor(z) >> 4, ChunkStatus.FULL, false) != null;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private static double dist3(double x1, double y1, double z1, double x2, double y2, double z2) {
+        return Math.sqrt(sq(x2 - x1) + sq(y2 - y1) + sq(z2 - z1));
+    }
+
+    private static double sq(double v) {
+        return v * v;
+    }
+
+    private static double parse(String raw, double cur) {
+        String s = raw.trim().replace('～', '~').replace('－', '-');
+        if (s.startsWith("~")) {
+            String r = s.substring(1);
+            return r.isEmpty() ? cur : cur + Double.parseDouble(r);
+        }
+        return Double.parseDouble(s);
     }
 }

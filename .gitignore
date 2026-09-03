@@ -14,3 +14,10 @@ bin/
 # Fabric / Loom
 run/
 remappedSrc/
+
+# 机密：含 Token 的上传脚本不入库
+ghps_qt.sh
+
+# 本地误拷贝文件
+*.zip
+*（复件）*

@@ -1,72 +1,74 @@
 # QuickTP
 
-**纯客户端传送 MOD · Minecraft 26.1.2 (Fabric)** — 零服务端权限，与 Meteor Client 完全兼容
+**Client-side teleport mod · Minecraft 26.1.2 (Fabric)** — No server permission needed, fully compatible with Meteor Client.
 
-## 功能
+> 🌐 [中文版 README（Chinese）](./README_zh.md)
 
-| 功能 | 说明 |
+## Features
+
+| Feature | Description |
 |---|---|
-| `/tp x y z` | 传送（支持 `~` 相对坐标、全角 `～`）|
-| **直射** | 目标区块未加载时单包瞬移（未加载区块豁免摔落结算）|
-| **冲刺保底** | 服务器有移动检查时自动降级，22格/tick（447 格/s，原版数学上限）|
-| **鞘翅提速** | 检测到鞘翅自动触发滑翔，提速至 774 格/s |
-| **NoFall** | `/tpnofall` 开关（默认开）：下落全程 `onGround=true` 清零摔落距离 |
-| **F12** | 紧急取消传送 |
+| `/tp x y z` | Teleport (supports `~` relative coords, full-width `～`) |
+| **Direct shot** | Instant single-packet teleport when target chunk is unloaded (fall-damage settlement exempted by `touchingUnloadedChunk`) |
+| **Sprint fallback** | Auto downgrade when server has movement checks: 22 blocks/tick (447 bps, vanilla mathematical cap) |
+| **Elytra boost** | Auto-triggers gliding when elytra detected: 774 bps |
+| **NoFall** | `/tpnofall` toggle (default ON): continuous `onGround=true` packets zero out fall distance |
+| **F12** | Emergency cancel |
 
-## 用法
+## Usage
 
 ```
-/tp 100 64 -200       绝对坐标
-/tp ~ ~50 ~           相对坐标
-/tpnofall             切换 NoFall
-F12                   取消传送
+/tp 100 64 -200       absolute coords
+/tp ~ ~50 ~           relative coords
+/tpnofall             toggle NoFall
+F12                   cancel teleport
 ```
 
-## 工作原理（基于 26.1.2 服务端源码逆向）
+## How it works (reversed from 26.1.2 server source)
 
-`ServerGamePacketListenerImpl` 的移动校验规则：
+`ServerGamePacketListenerImpl` movement validation:
 
-- 每 tick 最多 5 个移动包（超过反而按 1 算），位移² ≤ 100×包数 → 普通冲刺上限 ≈22.2 格/tick
-- 包内 `onGround` 参数直接用于摔落结算 → 全程 `onGround=true` + 微降 0.05，摔落距离恒为 0
-- 目标区块未加载时摔落结算整体豁免（`touchingUnloadedChunk`）→ 直射模式的安全通道
-- 穿墙碰撞检查（moved-wrongly）无豁免，无法绕过 → 采用高空航线/绕行
+- Max 5 move packets per tick (more gets clamped to 1), displacement² ≤ 100×count → sprint cap ≈22.2 blocks/tick
+- The packet's `onGround` parameter is used directly for fall-damage settlement → all packets use `onGround=true` + 0.05 dip, fall distance stays 0
+- Unloaded target chunk exempts fall settlement entirely (`touchingUnloadedChunk`) → the safe channel for direct shot
+- Wall-clipping check (moved-wrongly) has no exemption and cannot be bypassed → high-altitude routes / detours
 
-## 模式选择（自动）
+## Auto mode selection
 
 ```
 /tp x y z
-  ├─ 目标区块未加载 → 直射（单包瞬间，3秒内区块信号确认）
-  │     └─ 被弹回（服务器开检查）→ 自动降级冲刺
-  ├─ 目标区块已加载 → 冲刺（爬升380 → 高空微降巡航 → 碎步下降 → 立稳）
-  │     └─ 有鞘翅 → 触发滑翔提速 774 格/s
-  └─ 全程防摔：碎步3.9格（伤害=floor(3.9-3)=0）+ 锚定等待区块 + 落点寻地
+  ├─ Target chunk unloaded → DIRECT SHOT (instant, confirmed by chunk arrival signal)
+  │     └─ bounced (server checks) → auto downgrade to sprint
+  ├─ Target chunk loaded → SPRINT (climb 380 → cruise with -0.05 dip → 3.9-block steps → land)
+  │     └─ elytra detected → gliding boost to 774 bps
+  └─ Always safe: 3.9-block steps (damage=floor(3.9-3)=0) + anchor waiting + landing seek
 ```
 
-## 构建
+## Build
 
 ```bash
 gradle build
-# 产物: build/libs/quicktp-1.0.0.jar → 复制到 mods 目录
+# output: build/libs/quicktp-1.0.0.jar → copy to mods/
 ```
 
-- 构建体系：`net.fabricmc.fabric-loom` 1.17.x，MC 26.1.2 未混淆 jar，无 mappings
-- 依赖：Fabric API（普通 `implementation`）
+- Toolchain: `net.fabricmc.fabric-loom` 1.17.x, unmapped 26.1.2 jar (no mappings needed)
+- Dependency: Fabric API (plain `implementation`)
 
-## 兼容性
+## Compatibility
 
-- **Meteor Client**：零 Mixin、独立客户端命令空间，无冲突
-- **纯客户端**：`environment: client`，服务端无感
-- 需要 Fabric API（0.155+）
+- **Meteor Client**: zero mixins, isolated client command space — no conflict
+- **Client-only**: `environment: client`, server is unaware
+- Requires Fabric API (0.155+)
 
-## 技术边界（诚实说明）
+## Honest technical limits
 
-- 服务器开着 `playerMovementCheck` 时，任何客户端都突破不了 22.36 格/tick（原版线性阈值）
-- 已生成区块内的穿墙不可能（moved-wrongly 无豁免），穿墙只在未生成区块路径有效
-- 服务器端配置可解：`/gamerule playerMovementCheck false`（需要服主权限）后直射全场景生效
+- With `playerMovementCheck` enabled, NO client can exceed 22.36 blocks/tick (vanilla linear threshold)
+- Wall-clipping through generated chunks is impossible (moved-wrongly has no exemption); clipping only works in ungenerated chunk paths
+- Server-side solution for true instant teleport: `/gamerule playerMovementCheck false` (requires server OP)
 
-## 文件
+## Files
 
 ```
-src/main/java/com/example/quicktp/QuickTp.java   主逻辑（单文件）
-ghps_qt.sh                                       一键上传脚本（SSH 443）
+src/main/java/com/example/quicktp/QuickTp.java   Main logic (single file)
+ghps_qt.sh                                      One-click upload script (SSH 443)
 ```

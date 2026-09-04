@@ -78,7 +78,7 @@ public class QuickTp implements ClientModInitializer {
                     .executes(ctx -> {
                         noFall = !noFall;
                         ctx.getSource().sendFeedback(Component.literal(
-                                "§a[QuickTP] §fNoFall 已" + (noFall ? "§a开启" : "§c关闭")));
+                                "§a[QuickTP] " + (noFall ? L("§fNoFall 已§a开启", "§fNoFall §aON") : L("§fNoFall 已§c关闭", "§fNoFall §cOFF"))));
                         return 1;
                     }));
             dispatcher.register(ClientCommands.literal("tp")
@@ -104,7 +104,9 @@ public class QuickTp implements ClientModInitializer {
             ty = parse(ys, p.getY());
             tz = parse(zs, p.getZ());
         } catch (NumberFormatException e) {
-            src.sendError(Component.literal("§c[QuickTP] §f坐标格式错误！示例: /tp 100 64 -200 或 /tp ~ ~10 ~"));
+            src.sendError(Component.literal(L(
+                    "§c[QuickTP] §f坐标格式错误！示例: /tp 100 64 -200 或 /tp ~ ~10 ~",
+                    "§c[QuickTP] §fInvalid coords! e.g. /tp 100 64 -200 or /tp ~ ~10 ~")));
             return 0;
         }
 
@@ -137,8 +139,9 @@ public class QuickTp implements ClientModInitializer {
             lastSent = target;
             p.connection.send(new ServerboundMovePlayerPacket.Pos(tx, landY, tz, true, false));
             src.sendFeedback(Component.literal(String.format(
-                    "§a[QuickTP] §f直射！ §7(%.0f格)%s §8[F12取消]",
-                    dist, elytraEligible ? " §a(鞘翅已备)" : "")));
+                    L("§a[QuickTP] §f直射！ §7(%.0f格)%s §8[F12取消]",
+                      "§a[QuickTP] §fDirect shot! §7(%.0f blocks)%s §8[F12 cancel]"),
+                    dist, elytraEligible ? L(" §a(鞘翅已备)", " §a(elytra ready)") : "")));
             return 1;
         }
 
@@ -146,8 +149,9 @@ public class QuickTp implements ClientModInitializer {
         mode = MODE_SPRINT;
         planSprint(p.getX(), p.getY(), p.getZ(), 4.44);
         src.sendFeedback(Component.literal(String.format(
-                "§e[QuickTP] §f已加载区域 §7→ 冲刺模式(447格/s) %.0f格%s §8[F12取消]",
-                dist, elytraEligible ? " §a(鞘翅可提速)" : "")));
+                L("§e[QuickTP] §f已加载区域 §7→ 冲刺模式(447格/s) %.0f格%s §8[F12取消]",
+                  "§e[QuickTP] §fLoaded area §7→ sprint mode(447 bps) %.0f blocks%s §8[F12 cancel]"),
+                dist, elytraEligible ? L(" §a(鞘翅可提速)", " §a(elytra boost)") : "")));
         return 1;
     }
 
@@ -172,7 +176,9 @@ public class QuickTp implements ClientModInitializer {
                 reset();
                 mode = MODE_IDLE;
                 target = null;
-                p.sendSystemMessage(Component.literal("§c[QuickTP] §f传送已取消（F12）"));
+                p.sendSystemMessage(Component.literal(L(
+                        "§c[QuickTP] §f传送已取消（F12）",
+                        "§c[QuickTP] §fTeleport cancelled (F12)")));
             }
             return;
         }
@@ -197,8 +203,9 @@ public class QuickTp implements ClientModInitializer {
             boolean got = sy > 1 && chunkLoaded(target[0], target[2]);
             if (!got && ++timer > 60) {
                 // 区块一直没来 = 直射被弹回（服务器有移动检查）→ 降级冲刺保底
-                p.sendSystemMessage(Component.literal(
-                        "§c[QuickTP] §f直射被拦截 → 冲刺模式(447格/s)"));
+                p.sendSystemMessage(Component.literal(L(
+                        "§c[QuickTP] §f直射被拦截 → 冲刺模式(447格/s)",
+                        "§c[QuickTP] §fDirect shot blocked → sprint mode (447 bps)")));
                 mode = MODE_SPRINT;
                 timer = 0;
                 lastSent = null;
@@ -217,7 +224,8 @@ public class QuickTp implements ClientModInitializer {
             if (got && ++timer > 12) {            // 区块到位后立稳 12tick 收尾
                 mode = MODE_IDLE;
                 p.sendSystemMessage(Component.literal(String.format(
-                        "§a[QuickTP] §f已传送到 §e%.1f, %.1f, %.1f",
+                        L("§a[QuickTP] §f已传送到 §e%.1f, %.1f, %.1f",
+                          "§a[QuickTP] §fTeleported to §e%.1f, %.1f, %.1f"),
                         target[0], target[1], target[2])));
                 target = null;
             }
@@ -236,8 +244,9 @@ public class QuickTp implements ClientModInitializer {
                     elytraActive = true;
                     reset();
                     planSprint(p.getX(), p.getY(), p.getZ(), 7.7);
-                    p.sendSystemMessage(Component.literal(
-                            "§a[QuickTP] §f鞘翅滑翔已确认！§7提速至 774格/s"));
+                    p.sendSystemMessage(Component.literal(L(
+                            "§a[QuickTP] §f鞘翅滑翔已确认！§7提速至 774格/s",
+                            "§a[QuickTP] §fElytra flight confirmed! §7boosted to 774 bps")));
                 }
             }
 
@@ -256,7 +265,8 @@ public class QuickTp implements ClientModInitializer {
                     timer++;
                     if (timer % 100 == 1) {
                         p.sendSystemMessage(Component.literal(String.format(
-                                "§7[QuickTP] §f仍在等待区块生成... §e%.0f, %.0f §8(已等%ds · F12取消)",
+                                L("§7[QuickTP] §f仍在等待区块生成... §e%.0f, %.0f §8(已等%ds · F12取消)",
+                                  "§7[QuickTP] §fWaiting for chunk... §e%.0f, %.0f §8(%ds · F12)"),
                                 pt[0], pt[2], timer / 20)));
                     }
                     double ay = lastSent[1] - 0.05;
@@ -273,8 +283,9 @@ public class QuickTp implements ClientModInitializer {
                         reset();
                         mode = MODE_IDLE;
                         target = null;
-                        p.sendSystemMessage(Component.literal(
-                                "§c[QuickTP] §f起飞点被地形完全堵死，请移动几格后重试"));
+                        p.sendSystemMessage(Component.literal(L(
+                                "§c[QuickTP] §f起飞点被地形完全堵死，请移动几格后重试",
+                                "§c[QuickTP] §fTakeoff point fully blocked, move a bit and retry")));
                         return;
                     }
                     if (bounce > 4) {
@@ -286,7 +297,8 @@ public class QuickTp implements ClientModInitializer {
                         // 提示节流：每 4 次弹回才提醒一次，防止刷屏
                         if (bounce % 4 == 1) {
                             p.sendSystemMessage(Component.literal(
-                                    "§e[QuickTP] §f路径受阻，偏移绕行... §7(第" + (bounce - 4) + "次)"));
+                                    L("§e[QuickTP] §f路径受阻，偏移绕行... §7(第", "§e[QuickTP] §fDetouring... §7(#"))
+                                    + (bounce - 4) + L("次)", ")")));
                         }
                     } else {
                         planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
@@ -373,6 +385,20 @@ public class QuickTp implements ClientModInitializer {
 
     private static double sq(double v) {
         return v * v;
+    }
+
+    /**
+     * 多语言：跟随 Minecraft 客户端语言设置（zh 系列→中文，其他→英文）
+     */
+    private static String L(String zh, String en) {
+        try {
+            String code = Minecraft.getInstance().options.languageCode;
+            if (code != null && code.toLowerCase().startsWith("zh")) {
+                return zh;
+            }
+        } catch (Exception ignored) {
+        }
+        return en;
     }
 
     private static double parse(String raw, double cur) {

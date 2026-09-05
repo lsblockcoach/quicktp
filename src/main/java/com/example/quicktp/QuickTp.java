@@ -209,8 +209,19 @@ public class QuickTp implements ClientModInitializer {
         if (mode == MODE_LANDING) {
             double sy = surfaceY(target[0], target[2]);
             boolean got = sy > 1 && chunkLoaded(target[0], target[2]);
-            if (!got && ++timer > 60) {
-                // 区块一直没来 = 直射被弹回（服务器有移动检查）→ 降级冲刺保底
+            if (!got && ++timer > 600) {
+                // 30秒区块还没来 = 直射被弹回（服务器有移动检查）
+                double far = dist3(target[0], target[1], target[2],
+                        p.getX(), p.getY(), p.getZ());
+                if (far > 10000) {
+                    // 千万格距离无快速通道，别拿6小时冲刺折磨用户
+                    mode = MODE_IDLE;
+                    target = null;
+                    p.sendSystemMessage(Component.literal(L(
+                            "§c[QuickTP] §f直射被拦截且距离过远(" + Math.round(far) + "格)，已中止。服务器开着移动检查",
+                            "§c[QuickTP] §fDirect shot blocked & distance too far (" + Math.round(far) + " blocks), aborted. Server has movement checks")));
+                    return;
+                }
                 p.sendSystemMessage(Component.literal(L(
                         "§c[QuickTP] §f直射被拦截 → 冲刺模式(447格/s)",
                         "§c[QuickTP] §fDirect shot blocked → sprint mode (447 bps)")));
@@ -221,10 +232,17 @@ public class QuickTp implements ClientModInitializer {
                 planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
                 return;
             }
-            if (sy > 1 && target[1] < sy) target[1] = sy + 1; // 仅地下目标抬到地表；高空目标保持
-            for (int i = 0; i < 2; i++) {         // 立稳：onGround=true 定位包（摔落清零）
+            if (!got && timer % 100 == 1) {
+                // 等待提示（区块传输中，5秒一次）
+                p.sendSystemMessage(Component.literal(String.format(
+                        L("§7[QuickTP] §f等待着陆区块... §e%.0f, %.0f §8(已等%ds · F12取消)",
+                          "§7[QuickTP] §fWaiting for landing chunk... §e%.0f, %.0f §8(%ds · F12)"),
+                        target[0], target[2], timer / 20)));
+            }
+            if (got && target[1] < sy) target[1] = sy + 1; // 仅地下目标抬到地表；高空目标保持
+            for (int i = 0; i < 2; i++) {         // 立稳：onGround=true 微降定位包（摔落清零+防浮空踢）
                 p.connection.send(new ServerboundMovePlayerPacket.Pos(
-                        target[0], target[1], target[2], true, false));
+                        target[0], target[1] - 0.05, target[2], true, false));
             }
             p.absSnapTo(target[0], target[1], target[2], p.getYRot(), p.getXRot());
             p.setDeltaMovement(Vec3.ZERO);

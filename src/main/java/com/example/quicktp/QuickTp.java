@@ -235,9 +235,15 @@ public class QuickTp implements ClientModInitializer {
             if (!got && timer % 100 == 1) {
                 // 等待提示（区块传输中，5秒一次）
                 p.sendSystemMessage(Component.literal(String.format(
-                        L("§7[QuickTP] §f等待着陆区块... §e%.0f, %.0f §8(已等%ds · F12取消)",
-                          "§7[QuickTP] §fWaiting for landing chunk... §e%.0f, %.0f §8(%ds · F12)"),
-                        target[0], target[2], timer / 20)));
+                        L("§7[QuickTP] §f等待着陆区块... §e%.0f, %.0f §8(已等%ds · 第%d次/6)",
+                          "§7[QuickTP] §fWaiting for landing chunk... §e%.0f, %.0f §8(%ds · attempt %d/6)"),
+                        target[0], target[2], timer / 20, timer / 100 + 1)));
+            }
+            if (!got && timer % 100 == 2) {
+                // 每5秒重发一次直射包：anarchy 服务器检查随 TPS 波动间歇失效，
+                // 多试几次总会撞上"检查失效窗口"（runsNormally==false 时代整个检查被跳过）
+                p.connection.send(new ServerboundMovePlayerPacket.Pos(
+                        target[0], target[1], target[2], true, false));
             }
             if (got && target[1] < sy) target[1] = sy + 1; // 仅地下目标抬到地表；高空目标保持
             for (int i = 0; i < 2; i++) {         // 立稳：onGround=true 微降定位包（摔落清零+防浮空踢）

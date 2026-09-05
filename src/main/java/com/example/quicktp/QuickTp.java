@@ -59,6 +59,8 @@ public class QuickTp implements ClientModInitializer {
     private static boolean elytraActive = false;   // 服务器已确认滑翔（可提速）
     private static int flyTimer = 0;               // 飞行中重发滑翔触发包计时
     private static int bounce = 0;                 // 连续弹回计数（触发偏移绕行）
+    private static int upState = 0;               // 垂直大包状态: 0=未测 1=确认中 2=启用 -1=禁用
+    private static int upTimer = 0;               // 垂直确认计时
     private static final ArrayDeque<double[]> QUEUE = new ArrayDeque<>();
     private static double[] target = null;       // 目标{x,y,z}
     private static double[] lastSent = null;
@@ -131,6 +133,8 @@ public class QuickTp implements ClientModInitializer {
         elytraEligible = p.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA);
         elytraActive = false;
         flyTimer = 0;
+        upState = 0;
+        upTimer = 0;
 
         double dist = Math.sqrt(sq(tx - p.getX()) + sq(ty - p.getY()) + sq(tz - p.getZ()));
 
@@ -251,6 +255,39 @@ public class QuickTp implements ClientModInitializer {
                     p.sendSystemMessage(Component.literal(L(
                             "§a[QuickTP] §f鞘翅滑翔已确认！§7提速至 774格/s",
                             "§a[QuickTP] §fElytra flight confirmed! §7boosted to 774 bps")));
+                }
+            }
+
+            // ---------- 垂直大包：上升段加速（60格/tick，一次性探测） ----------
+            // 服务器接受大包（无移动检查/掉帧）→ 爬升提速3倍；弹回 → 本次传送禁用，静默回退小步
+            if (!QUEUE.isEmpty() && upState >= 0) {
+                double[] peek = QUEUE.peekFirst();
+                boolean climbing = peek[1] > lastSent[1] + 5.0;
+                if (climbing && upState != 1) {
+                    if (upState == 2 || upState == 0) {
+                        // 发 60 格上升大包（纵轴 ya>0 → 摔落距离不累积）
+                        double ny = lastSent[1] + 60.0;
+                        double sx = lastSent[0], sz = lastSent[2];
+                        p.connection.send(new ServerboundMovePlayerPacket.Pos(sx, ny, sz, true, false));
+                        p.absSnapTo(sx, ny, sz, p.getYRot(), p.getXRot());
+                        p.setDeltaMovement(Vec3.ZERO);
+                        lastSent = new double[]{sx, ny, sz};
+                        // 跳过已被覆盖的队列小点
+                        while (!QUEUE.isEmpty() && QUEUE.peekFirst()[1] < ny - 1.0) QUEUE.pollFirst();
+                        upState = 1;
+                        upTimer = 0;
+                        return;
+                    }
+                }
+                if (upState == 1 && ++upTimer > 3) {
+                    // 确认: 3tick 内没被弹回 = 大包被接受 → 启用快升；被弹回 → 禁用
+                    double dev = dist3(p.getX(), p.getY(), p.getZ(),
+                            lastSent[0], lastSent[1], lastSent[2]);
+                    upState = dev > 30.0 ? -1 : 2;
+                    if (upState == -1) {
+                        // 弹回后从实际位置继续（位置已被服务器拉回）
+                        lastSent = null;
+                    }
                 }
             }
 

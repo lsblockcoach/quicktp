@@ -84,9 +84,9 @@ public class QuickTp implements ClientModInitializer {
                         return 1;
                     }));
             dispatcher.register(ClientCommands.literal("//tp")
-                    .then(ClientCommands.argument("x", StringArgumentType.word())
-                    .then(ClientCommands.argument("y", StringArgumentType.word())
-                    .then(ClientCommands.argument("z", StringArgumentType.word())
+                    .then(ClientCommands.argument("x", StringArgumentType.string())
+                    .then(ClientCommands.argument("y", StringArgumentType.string())
+                    .then(ClientCommands.argument("z", StringArgumentType.string())
                             .executes(ctx -> {
                                 LocalPlayer p = ctx.getSource().getPlayer();
                                 return p == null ? 0 : start(ctx.getSource(), p,
@@ -232,14 +232,14 @@ public class QuickTp implements ClientModInitializer {
                 planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
                 return;
             }
-            if (!got && timer % 100 == 1) {
-                // 等待提示（区块传输中，5秒一次）
+            if (!got && timer % 40 == 1) {
+                // 等待提示（2秒一次）
                 p.sendSystemMessage(Component.literal(String.format(
-                        L("§7[QuickTP] §f等待着陆区块... §e%.0f, %.0f §8(已等%ds · 第%d次/6)",
-                          "§7[QuickTP] §fWaiting for landing chunk... §e%.0f, %.0f §8(%ds · attempt %d/6)"),
-                        target[0], target[2], timer / 20, timer / 100 + 1)));
+                        L("§7[QuickTP] §f等待着陆区块... §e%.0f, %.0f §8(已等%ds · 第%d次/15)",
+                          "§7[QuickTP] §fWaiting for landing chunk... §e%.0f, %.0f §8(%ds · attempt %d/15)"),
+                        target[0], target[2], timer / 20, timer / 40 + 1)));
             }
-            if (!got && timer % 100 == 2) {
+            if (!got && timer % 40 == 2) {
                 // 每5秒重发一次直射包：anarchy 服务器检查随 TPS 波动间歇失效，
                 // 多试几次总会撞上"检查失效窗口"（runsNormally==false 时代整个检查被跳过）
                 p.connection.send(new ServerboundMovePlayerPacket.Pos(
@@ -282,6 +282,9 @@ public class QuickTp implements ClientModInitializer {
                 }
             }
 
+            // 兜底：任何入口漏设 lastSent 时，以玩家当前位置为锚点（防 NPE/防错位）
+            if (lastSent == null) lastSent = anchor(p);
+
             // ---------- 垂直大包：上升段加速（60格/tick，一次性探测） ----------
             // 服务器接受大包（无移动检查/掉帧）→ 爬升提速3倍；弹回 → 本次传送禁用，静默回退小步
             if (!QUEUE.isEmpty() && upState >= 0) {
@@ -320,7 +323,6 @@ public class QuickTp implements ClientModInitializer {
                 timer = 0;
                 return;
             }
-            if (lastSent == null) lastSent = anchor(p);
             for (int i = 0; i < PKT && !QUEUE.isEmpty(); i++) {
                 double[] pt = QUEUE.peekFirst();
                 // 下降碎步门控：目标区块未生成→锚定等待（钉住防摔，绝不坠落）。

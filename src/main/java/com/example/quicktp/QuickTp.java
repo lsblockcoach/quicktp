@@ -218,10 +218,12 @@ public class QuickTp implements ClientModInitializer {
         if (mode == MODE_LANDING) {
             double sy = surfaceY(target[0], target[2]);
             boolean got = sy > 1 && chunkLoaded(target[0], target[2]);
-            if (!got && ++timer > 600) {
-                // 30秒区块还没来 = 直射被弹回（服务器有移动检查）
-                double far = dist3(target[0], target[1], target[2],
-                        p.getX(), p.getY(), p.getZ());
+            double far = dist3(target[0], target[1], target[2],
+                    p.getX(), p.getY(), p.getZ());
+            // 距离自适应总窗口：近处快速降级不空等，远处多撞检查失效窗口
+            int maxAttempts = far < 2000 ? 4 : far < 50000 ? 10 : 20;
+            if (!got && ++timer > maxAttempts * 10 + 20) {
+                // 窗口耗尽 = 直射被弹回（服务器稳定开着移动检查）
                 if (far > 10000) {
                     // 千万格距离无快速通道，别拿6小时冲刺折磨用户
                     mode = MODE_IDLE;
@@ -241,16 +243,16 @@ public class QuickTp implements ClientModInitializer {
                 planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
                 return;
             }
-            if (!got && timer % 40 == 1) {
-                // 等待提示（2秒一次）
+            if (!got && timer % 10 == 1) {
+                // 等待提示（0.5秒一次）
                 p.sendSystemMessage(Component.literal(String.format(
-                        L("§7[QuickTP] §f等待着陆区块... §e%.0f, %.0f §8(已等%ds · 第%d次/15)",
-                          "§7[QuickTP] §fWaiting for landing chunk... §e%.0f, %.0f §8(%ds · attempt %d/15)"),
-                        target[0], target[2], timer / 20, timer / 40 + 1)));
+                        L("§7[QuickTP] §f等待直射确认... §e%.0f, %.0f §8(第%d/%d次)",
+                          "§7[QuickTP] §fWaiting for direct-shot confirm... §e%.0f, %.0f §8(attempt %d/%d)"),
+                        target[0], target[2], timer / 10 + 1, maxAttempts)));
             }
-            if (!got && timer % 40 == 2) {
-                // 每5秒重发一次直射包：anarchy 服务器检查随 TPS 波动间歇失效，
-                // 多试几次总会撞上"检查失效窗口"（runsNormally==false 时代整个检查被跳过）
+            if (!got && timer % 10 == 2) {
+                // 每0.5秒重发直射包：服务器检查随 TPS 波动间歇失效，
+                // 快速重试撞"检查失效窗口"（runsNormally==false 时整个检查被跳过）
                 p.connection.send(new ServerboundMovePlayerPacket.Pos(
                         target[0], target[1], target[2], true, false));
             }

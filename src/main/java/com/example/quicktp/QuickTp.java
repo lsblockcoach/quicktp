@@ -296,9 +296,9 @@ public class QuickTp implements ClientModInitializer {
                         planSprint(p.getX() + ox, p.getY(), p.getZ() + oz, elytraActive ? 7.7 : 4.44);
                         // 提示节流：每 4 次弹回才提醒一次，防止刷屏
                         if (bounce % 4 == 1) {
-                            p.sendSystemMessage(Component.literal(
-                                    L("§e[QuickTP] §f路径受阻，偏移绕行... §7(第", "§e[QuickTP] §fDetouring... §7(#"))
-                                    + (bounce - 4) + L("次)", ")")));
+                            String msg = L("§e[QuickTP] §f路径受阻，偏移绕行... §7(第", "§e[QuickTP] §fDetouring... §7(#")
+                                    + (bounce - 4) + L("次)", ")");
+                            p.sendSystemMessage(Component.literal(msg));
                         }
                     } else {
                         planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);

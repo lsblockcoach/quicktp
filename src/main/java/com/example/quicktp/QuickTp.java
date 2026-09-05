@@ -110,13 +110,17 @@ public class QuickTp implements ClientModInitializer {
             return 0;
         }
 
-        // 落点：目标低于地表→修正到地表+1；半空→落到地表（防摔统一处理）
+        // 落点：只有"目标低于地表"才抬到地表+1；高空目标（y>地表）保留原样→真的飞到高处
         double landY = ty;
         double sy = surfaceY(tx, tz);
         String hint = "";
-        if (sy > 1 && (ty < sy || ty > sy + 2)) {
-            landY = sy + 1;
-            hint = ty < sy ? " §7(地下目标→落至地表)" : " §7(半空目标→落至地表)";
+        if (sy > 1) {
+            if (ty < sy) {
+                landY = sy + 1;
+                hint = " §7(地下→地表)";
+            } else if (ty > sy + 2) {
+                hint = " §7(高空目标)";
+            }
         }
 
         target = new double[]{tx, landY, tz};
@@ -213,7 +217,7 @@ public class QuickTp implements ClientModInitializer {
                 planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
                 return;
             }
-            if (sy > 1) target[1] = sy + 1;      // 区块生成后钉到真实地表
+            if (sy > 1 && target[1] < sy) target[1] = sy + 1; // 仅地下目标抬到地表；高空目标保持
             for (int i = 0; i < 2; i++) {         // 立稳：onGround=true 定位包（摔落清零）
                 p.connection.send(new ServerboundMovePlayerPacket.Pos(
                         target[0], target[1], target[2], true, false));
@@ -320,7 +324,15 @@ public class QuickTp implements ClientModInitializer {
         QUEUE.clear();
         timer = 0;
         double tx = target[0], ty = target[1], tz = target[2];
-        double cruiseY = Math.max(Math.max(py, CRUISE_Y), ty) + 8.0;
+        // 近距离(<400格)：低空直线（只比起点高8格），不会大起大落；
+        // 远距离：才上 380 高空（防未知地形撞山）
+        double hDist = Math.sqrt(sq(tx - px) + sq(tz - pz));
+        double cruiseY;
+        if (hDist < 400) {
+            cruiseY = Math.max(py, ty) + 8.0;
+        } else {
+            cruiseY = Math.max(Math.max(py, CRUISE_Y), ty) + 8.0;
+        }
         segment(px, py, pz, px, cruiseY, pz, stepLen);           // 爬升
         segment(px, cruiseY, pz, tx, cruiseY - 0.001, tz, stepLen); // 巡航微降斜线
         segment(tx, cruiseY, tz, tx, ty, tz, stepLen);           // 下降（内部自动用3.9碎步）

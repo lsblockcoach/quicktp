@@ -74,14 +74,14 @@ public class QuickTp implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
-            dispatcher.register(ClientCommands.literal("tpnofall")
+            dispatcher.register(ClientCommands.literal("//tpnofall")
                     .executes(ctx -> {
                         noFall = !noFall;
                         ctx.getSource().sendFeedback(Component.literal(
                                 "§a[QuickTP] " + (noFall ? L("§fNoFall 已§a开启", "§fNoFall §aON") : L("§fNoFall 已§c关闭", "§fNoFall §cOFF"))));
                         return 1;
                     }));
-            dispatcher.register(ClientCommands.literal("tp")
+            dispatcher.register(ClientCommands.literal("//tp")
                     .then(ClientCommands.argument("x", StringArgumentType.word())
                     .then(ClientCommands.argument("y", StringArgumentType.word())
                     .then(ClientCommands.argument("z", StringArgumentType.word())

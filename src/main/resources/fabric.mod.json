@@ -4,7 +4,7 @@
   "version": "${version}",
   "name": "QuickTP",
   "description": "Client-side only /tp x y z command. Sends a position packet directly to the server. No server permission required.",
-  "authors": ["you"],
+  "authors": ["raw"],
   "license": "MIT",
   "environment": "client",
   "entrypoints": {

@@ -8,19 +8,19 @@
 
 | Feature | Description |
 |---|---|
-| `/tp x y z` | Teleport (supports `~` relative coords, full-width `～`) |
+| `///tp x y z` | Teleport (supports `~` relative coords, full-width `～`) |
 | **Direct shot** | Instant single-packet teleport when target chunk is unloaded (fall-damage settlement exempted by `touchingUnloadedChunk`) |
 | **Sprint fallback** | Auto downgrade when server has movement checks: 22 blocks/tick (447 bps, vanilla mathematical cap) |
 | **Elytra boost** | Auto-triggers gliding when elytra detected: 774 bps |
-| **NoFall** | `/tpnofall` toggle (default ON): continuous `onGround=true` packets zero out fall distance |
+| **NoFall** | `///tpnofall` toggle (default ON): continuous `onGround=true` packets zero out fall distance |
 | **F12** | Emergency cancel |
 
 ## Usage
 
 ```
-/tp 100 64 -200       absolute coords
-/tp ~ ~50 ~           relative coords
-/tpnofall             toggle NoFall
+///tp 100 64 -200       absolute coords
+///tp ~ ~50 ~           relative coords
+///tpnofall             toggle NoFall
 F12                   cancel teleport
 ```
 
@@ -36,7 +36,7 @@ F12                   cancel teleport
 ## Auto mode selection
 
 ```
-/tp x y z
+///tp x y z
   ├─ Target chunk unloaded → DIRECT SHOT (instant, confirmed by chunk arrival signal)
   │     └─ bounced (server checks) → auto downgrade to sprint
   ├─ Target chunk loaded → SPRINT (climb 380 → cruise with -0.05 dip → 3.9-block steps → land)

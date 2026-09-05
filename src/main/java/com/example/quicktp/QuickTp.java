@@ -153,13 +153,22 @@ public class QuickTp implements ClientModInitializer {
             return 1;
         }
 
-        // ===== 目标区块已加载 → 直射必摔（fallDistance 结算）→ 冲刺模式 =====
+        // ===== 目标区块已加载 → 水平直射到目标上空 + 碎步降落 =====
+        // 水平大包 ya≈0 → 摔落距离零增长（无论服务器检查开不开都不摔）；
+        // 撞上检查失效窗口=瞬间到上空+碎步落地；被弹回→SPRINT弹回保险丝自动转冲刺（自愈）
         mode = MODE_SPRINT;
-        planSprint(p.getX(), p.getY(), p.getZ(), 4.44);
+        timer = 0;
+        double hopY = Math.max(p.getY(), landY) + 8.0;
+        lastSent = new double[]{tx, hopY, tz};
+        p.connection.send(new ServerboundMovePlayerPacket.Pos(tx, hopY, tz, true, false));
+        p.absSnapTo(tx, hopY, tz, p.getYRot(), p.getXRot());
+        p.setDeltaMovement(Vec3.ZERO);
+        QUEUE.clear();
+        segment(tx, hopY, tz, tx, landY, tz, 7.0);   // 下降碎步（内部自动3.9格防摔）
         src.sendFeedback(Component.literal(String.format(
-                L("§e[QuickTP] §f已加载区域 §7→ 冲刺模式(447格/s) %.0f格%s §8[F12取消]",
-                  "§e[QuickTP] §fLoaded area §7→ sprint mode(447 bps) %.0f blocks%s §8[F12 cancel]"),
-                dist, elytraEligible ? L(" §a(鞘翅可提速)", " §a(elytra boost)") : "")));
+                L("§a[QuickTP] §f已加载区域 → 水平直射尝试 %.0f格%s §8[F12取消]",
+                  "§a[QuickTP] §fLoaded area → horizontal direct shot %.0f blocks%s §8[F12 cancel]"),
+                dist, elytraEligible ? L(" §a(鞘翅已备)", " §a(elytra ready)") : "")));
         return 1;
     }
 

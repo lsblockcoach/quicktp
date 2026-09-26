@@ -82,8 +82,33 @@ public class QuickTp implements ClientModInitializer {
                         ctx.getSource().sendFeedback(Component.literal(
                                 "§a[QuickTP] " + (noFall ? L("§fNoFall 已§a开启", "§fNoFall §aON") : L("§fNoFall 已§c关闭", "§fNoFall §cOFF"))));
                         return 1;
-                    }));
+                    })
+                    .then(ClientCommands.argument("value", com.mojang.brigadier.arguments.StringArgumentType.word())
+                            .executes(ctx -> {
+                                String v = com.mojang.brigadier.arguments.StringArgumentType.getString(ctx, "value");
+                                noFall = v.equalsIgnoreCase("on");
+                                ctx.getSource().sendFeedback(Component.literal(
+                                        "§a[QuickTP] " + (noFall ? L("§fNoFall 已§a开启", "§fNoFall §aON") : L("§fNoFall 已§c关闭", "§fNoFall §cOFF"))));
+                                return 1;
+                            })));
+            // 形态1：greedy 整串（~不起作用的根治：不依赖 Brigadier tokenizer，自行 split）
             dispatcher.register(ClientCommands.literal("//tp")
+                    .then(ClientCommands.argument("xyz", StringArgumentType.greedyString())
+                            .executes(ctx -> {
+                                LocalPlayer p = ctx.getSource().getPlayer();
+                                if (p == null) return 0;
+                                String raw = StringArgumentType.getString(ctx, "xyz").trim();
+                                String[] parts = raw.split("\\s+");
+                                if (parts.length != 3) {
+                                    ctx.getSource().sendError(Component.literal(L(
+                                            "§c[QuickTP] §f需要三个坐标，示例: ///tp 100 64 -200 或 ///tp ~ ~10 ~",
+                                            "§c[QuickTP] §fNeed 3 coords, e.g. ///tp 100 64 -200 or ///tp ~ ~10 ~")));
+                                    return 0;
+                                }
+                                return start(ctx.getSource(), p, parts[0], parts[1], parts[2]);
+                            })));
+            // 形态2：三参数（兼容旧用法）
+            dispatcher.register(ClientCommands.literal("//tp2")
                     .then(ClientCommands.argument("x", StringArgumentType.string())
                     .then(ClientCommands.argument("y", StringArgumentType.string())
                     .then(ClientCommands.argument("z", StringArgumentType.string())

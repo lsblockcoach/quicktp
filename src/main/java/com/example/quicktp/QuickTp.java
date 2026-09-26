@@ -59,6 +59,7 @@ public class QuickTp implements ClientModInitializer {
     private static boolean elytraActive = false;   // 服务器已确认滑翔（可提速）
     private static int flyTimer = 0;               // 飞行中重发滑翔触发包计时
     private static int bounce = 0;                 // 连续弹回计数（触发偏移绕行）
+    private static boolean needDescent = false;  // 直射点高于落点 → 需碎步下降
     private static int upState = 0;               // 垂直大包状态: 0=未测 1=确认中 2=启用 -1=禁用
     private static int upTimer = 0;               // 垂直确认计时
     private static final ArrayDeque<double[]> QUEUE = new ArrayDeque<>();
@@ -142,6 +143,9 @@ public class QuickTp implements ClientModInitializer {
         target = new double[]{tx, landY, tz};
         reset();
         bounce = 0;
+        needDescent = false;
+        upState = 0;
+        upTimer = 0;
 
         // 预检鞘翅（提速档位提示）
         elytraEligible = p.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA);
@@ -154,12 +158,15 @@ public class QuickTp implements ClientModInitializer {
 
         if (!chunkLoaded(tx, tz)) {
             // ===== 目标区块未加载 → 【直射】单包直达 =====
-            // 未加载区块豁免摔落结算（touchingUnloadedChunk→return），直射唯一安全通道；
-            // 成功信号=目标区块被服务器送达客户端（大跳/直射被接受才会发生）。
+            // 关键：直射包 y 绝不下降（ya>=0）——否则被弹回时 doCheckFallDamage
+            // 会结算巨量 fallDistance 直接把玩家摔死（"直射失败=退出"的元凶）！
+            // 目标低于起点 → 直射到"起点等高"（水平，弹回零风险）→ 再碎步下降。
+            double directY = Math.max(landY, p.getY());
+            needDescent = directY > landY + 0.5;
             mode = MODE_PROBE;
             timer = 0;
-            lastSent = target;
-            p.connection.send(new ServerboundMovePlayerPacket.Pos(tx, landY, tz, true, false));
+            lastSent = new double[]{tx, directY, tz};
+            p.connection.send(new ServerboundMovePlayerPacket.Pos(tx, directY, tz, true, false));
             src.sendFeedback(Component.literal(String.format(
                     L("§a[QuickTP] §f直射！ §7(%.0f格)%s §8[F12取消]",
                       "§a[QuickTP] §fDirect shot! §7(%.0f blocks)%s §8[F12 cancel]"),
@@ -221,8 +228,17 @@ public class QuickTp implements ClientModInitializer {
 
         // ---------- A. 直射（单包，仅用于目标区块未加载时） ----------
         if (mode == MODE_PROBE) {
-            if (++timer > 8) {      // 8tick 后进入落地验证（区块信号判定成败）
-                mode = MODE_LANDING;
+            if (++timer > 8) {      // 8tick 后进入落地阶段
+                if (needDescent && target != null) {
+                    // 直射到"起点等高"处 → 碎步下降（每步3.9 onGround结算0伤）
+                    mode = MODE_SPRINT;
+                    QUEUE.clear();
+                    lastSent = new double[]{target[0], Math.max(target[1], p.getY()), target[2]};
+                    segment(target[0], Math.max(target[1], p.getY()), target[2],
+                            target[0], target[1], target[2], 7.0);
+                } else {
+                    mode = MODE_LANDING;
+                }
                 timer = 0;
             }
             return;
@@ -238,6 +254,16 @@ public class QuickTp implements ClientModInitializer {
             int maxAttempts = far < 2000 ? 4 : far < 50000 ? 8 : 10;
             if (!got && ++timer > maxAttempts * 10 + 20) {
                 // 窗口耗尽 = 直射被弹回（服务器有移动检查）→ 立刻转冲刺赶路（447格/s 保底）
+                if (far < 60) {
+                    // 已近在咫尺：不等区块，直接立稳收尾（区块仍在生成中也先落定）
+                    mode = MODE_IDLE;
+                    p.sendSystemMessage(Component.literal(String.format(L(
+                            "§a[QuickTP] §f已到达 §e%.1f, %.1f, %.1f §7(区块生成中，稍候自动寻地)",
+                            "§a[QuickTP] §fArrived §e%.1f, %.1f, %.1f §7(chunk generating, auto-landing)"),
+                            target[0], target[1], target[2])));
+                    target = null;
+                    return;
+                }
                 p.sendSystemMessage(Component.literal(String.format(L(
                         "§c[QuickTP] §f直射被拦截 → 冲刺赶路 §7(%.0f格 · %.0f格/s，F12可取消)",
                         "§c[QuickTP] §fDirect shot blocked → sprinting §7(%.0f blocks · %.0f bps, F12 to stop)"),
@@ -342,23 +368,6 @@ public class QuickTp implements ClientModInitializer {
             }
             for (int i = 0; i < PKT && !QUEUE.isEmpty(); i++) {
                 double[] pt = QUEUE.peekFirst();
-                // 下降碎步门控：目标区块未生成→锚定等待（钉住防摔，绝不坠落）。
-                // 不限超时！区块迟早生成；等待期间持续锚定（onGround=true+微降 →
-                // 不摔不死不被踢），每 5 秒提示一次，F12 随时手动取消。
-                if (pt[1] < lastSent[1] && !chunkLoaded(pt[0], pt[2])) {
-                    timer++;
-                    if (timer % 100 == 1) {
-                        p.sendSystemMessage(Component.literal(String.format(
-                                L("§7[QuickTP] §f仍在等待区块生成... §e%.0f, %.0f §8(已等%ds · F12取消)",
-                                  "§7[QuickTP] §fWaiting for chunk... §e%.0f, %.0f §8(%ds · F12)"),
-                                pt[0], pt[2], timer / 20)));
-                    }
-                    double ay = lastSent[1] - 0.05;
-                    p.connection.send(new ServerboundMovePlayerPacket.Pos(lastSent[0], ay, lastSent[2], true, false));
-                    p.absSnapTo(lastSent[0], ay, lastSent[2], p.getYRot(), p.getXRot());
-                    p.setDeltaMovement(Vec3.ZERO);
-                    return;
-                }
                 // 弹回保险 + 偏移绕行（解决起飞/降落路径被墙挡时的死循环）
                 if (dist3(p.getX(), p.getY(), p.getZ(), lastSent[0], lastSent[1], lastSent[2]) > 26.0) {
                     bounce++;

@@ -107,19 +107,8 @@ public class QuickTp implements ClientModInitializer {
                                 }
                                 return start(ctx.getSource(), p, parts[0], parts[1], parts[2]);
                             })));
-            // 形态2：三参数（兼容旧用法）
-            dispatcher.register(ClientCommands.literal("//tp2")
-                    .then(ClientCommands.argument("x", StringArgumentType.string())
-                    .then(ClientCommands.argument("y", StringArgumentType.string())
-                    .then(ClientCommands.argument("z", StringArgumentType.string())
-                            .executes(ctx -> {
-                                LocalPlayer p = ctx.getSource().getPlayer();
-                                return p == null ? 0 : start(ctx.getSource(), p,
-                                        StringArgumentType.getString(ctx, "x"),
-                                        StringArgumentType.getString(ctx, "y"),
-                                        StringArgumentType.getString(ctx, "z"));
-                            })))));
         });
+
         ClientTickEvents.END_CLIENT_TICK.register(client -> tick());
     }
 
@@ -245,22 +234,14 @@ public class QuickTp implements ClientModInitializer {
             boolean got = sy > 1 && chunkLoaded(target[0], target[2]);
             double far = dist3(target[0], target[1], target[2],
                     p.getX(), p.getY(), p.getZ());
-            // 距离自适应总窗口：近处快速降级不空等，远处多撞检查失效窗口
-            int maxAttempts = far < 2000 ? 4 : far < 50000 ? 10 : 20;
+            // 距离自适应总窗口：近处快速降级不空等，远处撞窗口也最多 5 秒
+            int maxAttempts = far < 2000 ? 4 : far < 50000 ? 8 : 10;
             if (!got && ++timer > maxAttempts * 10 + 20) {
-                // 窗口耗尽 = 直射被弹回（服务器稳定开着移动检查）
-                if (far > 10000) {
-                    // 千万格距离无快速通道，别拿6小时冲刺折磨用户
-                    mode = MODE_IDLE;
-                    target = null;
-                    p.sendSystemMessage(Component.literal(L(
-                            "§c[QuickTP] §f直射被拦截且距离过远(" + Math.round(far) + "格)，已中止。服务器开着移动检查",
-                            "§c[QuickTP] §fDirect shot blocked & distance too far (" + Math.round(far) + " blocks), aborted. Server has movement checks")));
-                    return;
-                }
-                p.sendSystemMessage(Component.literal(L(
-                        "§c[QuickTP] §f直射被拦截 → 冲刺模式(447格/s)",
-                        "§c[QuickTP] §fDirect shot blocked → sprint mode (447 bps)")));
+                // 窗口耗尽 = 直射被弹回（服务器有移动检查）→ 立刻转冲刺赶路（447格/s 保底）
+                p.sendSystemMessage(Component.literal(String.format(L(
+                        "§c[QuickTP] §f直射被拦截 → 冲刺赶路 §7(%.0f格 · %.0f格/s，F12可取消)",
+                        "§c[QuickTP] §fDirect shot blocked → sprinting §7(%.0f blocks · %.0f bps, F12 to stop)"),
+                        far, elytraActive ? 774.0 : 447.0)));
                 mode = MODE_SPRINT;
                 timer = 0;
                 lastSent = null;
@@ -271,9 +252,9 @@ public class QuickTp implements ClientModInitializer {
             if (!got && timer % 10 == 1) {
                 // 等待提示（0.5秒一次）
                 p.sendSystemMessage(Component.literal(String.format(
-                        L("§7[QuickTP] §f等待直射确认... §e%.0f, %.0f §8(第%d/%d次)",
-                          "§7[QuickTP] §fWaiting for direct-shot confirm... §e%.0f, %.0f §8(attempt %d/%d)"),
-                        target[0], target[2], timer / 10 + 1, maxAttempts)));
+                        L("§7[QuickTP] §f等待直射确认... §e%.0f, %.0f §8(第%d/%d次 · 一直不动=被拦截，%d秒后放弃)",
+                          "§7[QuickTP] §fWaiting direct-shot... §e%.0f, %.0f §8(%d/%d · blocked if stuck, giving up in %ds)"),
+                        target[0], target[2], timer / 10 + 1, maxAttempts, maxAttempts - timer / 10)));
             }
             if (!got && timer % 10 == 2) {
                 // 每0.5秒重发直射包：服务器检查随 TPS 波动间歇失效，

@@ -62,6 +62,7 @@ public class QuickTp implements ClientModInitializer {
     private static boolean needDescent = false;  // 直射点高于落点 → 需碎步下降
     private static int upState = 0;               // 垂直大包状态: 0=未测 1=确认中 2=启用 -1=禁用
     private static int upTimer = 0;               // 垂直确认计时
+    private static int confirmWait = 0;           // 队列发完后的服务器确认窗
     private static final ArrayDeque<double[]> QUEUE = new ArrayDeque<>();
     private static double[] target = null;       // 目标{x,y,z}
     private static double[] lastSent = null;
@@ -197,6 +198,7 @@ public class QuickTp implements ClientModInitializer {
         QUEUE.clear();
         lastSent = null;
         timer = 0;
+        confirmWait = 0;
     }
 
     // ============================================================ 主循环
@@ -362,7 +364,25 @@ public class QuickTp implements ClientModInitializer {
             }
 
             if (QUEUE.isEmpty()) {
-                mode = MODE_LANDING;   // 走立稳收尾
+                // ===== 服务器确认窗（防假到达）：6 tick 内不发包、不snap =====
+                // 让迟到的弹回包把本地位置拉回原形——没被弹回才算真到达
+                if (lastSent != null && confirmWait++ < 6) {
+                    return;
+                }
+                confirmWait = 0;
+                if (lastSent != null && dist3(p.getX(), p.getY(), p.getZ(),
+                        lastSent[0], lastSent[1], lastSent[2]) > 12.0) {
+                    // 被服务器弹回（还没到）→ 从真实位置重新规划继续赶路
+                    p.sendSystemMessage(Component.literal(L(
+                            "§e[QuickTP] §f被服务器弹回，继续赶路...",
+                            "§e[QuickTP] §fBounced back, continuing...")));
+                    lastSent = null;
+                    QUEUE.clear();
+                    planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
+                    return;
+                }
+                // 确认没被弹回 → 真到达 → 立稳收尾
+                mode = MODE_LANDING;
                 timer = 0;
                 return;
             }

@@ -47,7 +47,11 @@ public class QuickTp implements ClientModInitializer {
     private static final int MODE_LANDING = 3;  // 落地验证+立稳
     private static final int MODE_ELYTRA = 4;   // 鞘翅触发等待
 
-    private static final int PKT = 5;                    // 每tick 5包
+    private static final int PKT = 5;                    // 保留常量（不再直接使用）
+    // ===== XZ 档位自适应（BayMcCore 实测：单包XZ上限≈100线性；Y不受限） =====
+    private static double burstStep = 95.0;              // 每包位移（95<100 余量）
+    private static int burstPkts = 1;                    // 每tick包数（1→10 探累计上限）
+    private static int stableTicks = 0;                  // 稳定计数（升档用）
     private static final double STEP = 4.44;             // 普通模式水平步长（鞘翅用 7.7）
     private static final double DESCEND_STEP = 3.9;      // 下降步长（伤害=floor(3.9-3)=0）
     private static final double CRUISE_Y = 380.0;        // 巡航高度
@@ -271,7 +275,7 @@ public class QuickTp implements ClientModInitializer {
                 lastSent = null;
                 landedSnap = null;
                 QUEUE.clear();
-                planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
+                planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
                 return;
             }
             double sy = surfaceY(target[0], target[2]);
@@ -300,7 +304,7 @@ public class QuickTp implements ClientModInitializer {
                 timer = 0;
                 lastSent = null;
                 QUEUE.clear();
-                planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
+                planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
                 return;
             }
             if (!got && timer % 10 == 1) {
@@ -347,7 +351,7 @@ public class QuickTp implements ClientModInitializer {
                 if (p.isFallFlying()) {
                     elytraActive = true;
                     reset();
-                    planSprint(p.getX(), p.getY(), p.getZ(), 7.7);
+                    planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
                     p.sendSystemMessage(Component.literal(L(
                             "§a[QuickTP] §f鞘翅滑翔已确认！§7提速至 774格/s",
                             "§a[QuickTP] §fElytra flight confirmed! §7boosted to 774 bps")));
@@ -405,7 +409,7 @@ public class QuickTp implements ClientModInitializer {
                             "§e[QuickTP] §fBounced back, continuing...")));
                     lastSent = null;
                     QUEUE.clear();
-                    planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
+                    planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
                     return;
                 }
                 // 确认没被弹回 → 真到达 → 立稳收尾
@@ -413,9 +417,26 @@ public class QuickTp implements ClientModInitializer {
                 timer = 0;
                 return;
             }
-            for (int i = 0; i < PKT && !QUEUE.isEmpty(); i++) {
+            for (int i = 0; i < burstPkts && !QUEUE.isEmpty(); i++) {
                 double[] pt = QUEUE.peekFirst();
-                // 弹回保险 + 偏移绕行（解决起飞/降落路径被墙挡时的死循环）
+                // ===== 档位退档优先（XZ 累计探测失败）：弹回先降档，不急着重规划 =====
+                if (dist3(p.getX(), p.getY(), p.getZ(), lastSent[0], lastSent[1], lastSent[2]) > 26.0) {
+                    if (burstPkts > 1) {
+                        // 累计超限：退一包数档（队列点距不变，pkts=1 即单包95<100 安全）
+                        burstPkts--;
+                        lastSent = null;
+                        showBurstTier(p);
+                        return;
+                    }
+                    if (burstStep > 24.0) {
+                        // 单包就超限（服务器收紧/墙边缘）：减半重规划
+                        burstStep = Math.max(24.0, burstStep / 2);
+                        planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
+                        lastSent = null;
+                        showBurstTier(p);
+                        return;
+                    }
+                // ===== 以下为原有：挡墙绕行处理（最小档才走） =====
                 if (dist3(p.getX(), p.getY(), p.getZ(), lastSent[0], lastSent[1], lastSent[2]) > 26.0) {
                     bounce++;
                     if (bounce > 60) {
@@ -433,7 +454,7 @@ public class QuickTp implements ClientModInitializer {
                         int k = bounce - 4;
                         double ox = (k % 4 == 0) ? 8.0 * (k / 4 + 1) : (k % 4 == 1) ? -8.0 * (k / 4 + 1) : 0;
                         double oz = (k % 4 == 2) ? 8.0 * (k / 4 + 1) : (k % 4 == 3) ? -8.0 * (k / 4 + 1) : 0;
-                        planSprint(p.getX() + ox, p.getY(), p.getZ() + oz, elytraActive ? 7.7 : 4.44);
+                        planSprint(p.getX() + ox, p.getY(), p.getZ() + oz, burstStep);
                         // 提示节流：每 4 次弹回才提醒一次，防止刷屏
                         if (bounce % 4 == 1) {
                             String msg = L("§e[QuickTP] §f路径受阻，偏移绕行... §7(第", "§e[QuickTP] §fDetouring... §7(#")
@@ -441,10 +462,11 @@ public class QuickTp implements ClientModInitializer {
                             p.sendSystemMessage(Component.literal(msg));
                         }
                     } else {
-                        planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
+                        planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
                     }
                     lastSent = null;   // ← 关键修复：重置锚点，避免下一tick重复误判弹回刷屏
                     return;
+                    }
                 }
                 lastSent = QUEUE.pollFirst();
                 p.connection.send(new ServerboundMovePlayerPacket.Pos(lastSent[0], lastSent[1], lastSent[2], true, false));
@@ -452,6 +474,24 @@ public class QuickTp implements ClientModInitializer {
             p.absSnapTo(lastSent[0], lastSent[1], lastSent[2], p.getYRot(), p.getXRot());
             p.setDeltaMovement(Vec3.ZERO);
             bounce = 0;
+
+            // ===== 档位升档：连续稳定 15 tick → 每 tick 包数 +1（累计位移探测） =====
+            if (++stableTicks >= 15 && burstPkts < 10) {
+                burstPkts++;
+                stableTicks = 0;
+                showBurstTier(p);
+            }
+        }
+    }
+
+    /** 档位提示（actionbar 覆盖式，不刷聊天） */
+    private static void showBurstTier(LocalPlayer p) {
+        var gui = Minecraft.getInstance().gui;
+        if (gui != null) {
+            double perTick = burstStep * burstPkts;
+            gui.setOverlayMessage(Component.literal(String.format(
+                    "§a[QuickTP] §f速度档: §e%.0f格/tick §7(%.0f格/s · %d包×%.0f)",
+                    perTick, perTick * 20, burstPkts, burstStep)), false);
         }
     }
 

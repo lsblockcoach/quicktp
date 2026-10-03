@@ -235,10 +235,17 @@ public class QuickTp implements ClientModInitializer {
             if (++timer > 8) {      // 8tick 后进入落地阶段
                 if (needDescent && target != null) {
                     // 直射到"起点等高"处 → 碎步下降（每步3.9 onGround结算0伤）
+                    double hopY = Math.max(target[1], p.getY());
+                    // 关键：本地同步到直射点！否则 SPRINT 保险丝第一 tick 就
+                    // 把"本地在起点 vs lastSent=直射点"误判为弹回 → 放弃直射全程447冲刺。
+                    // 同步后：直射真被弹回 → 弹回包会把本地拉回起点 → 保险丝正确转冲刺；
+                    // 直射成功 → 本地在直射点无弹回 → 碎步正常执行（瞬间到达体验）
+                    p.absSnapTo(target[0], hopY, target[2], p.getYRot(), p.getXRot());
+                    p.setDeltaMovement(Vec3.ZERO);
                     mode = MODE_SPRINT;
                     QUEUE.clear();
-                    lastSent = new double[]{target[0], Math.max(target[1], p.getY()), target[2]};
-                    segment(target[0], Math.max(target[1], p.getY()), target[2],
+                    lastSent = new double[]{target[0], hopY, target[2]};
+                    segment(target[0], hopY, target[2],
                             target[0], target[1], target[2], 7.0);
                 } else {
                     mode = MODE_LANDING;

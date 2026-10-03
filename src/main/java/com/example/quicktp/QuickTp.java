@@ -458,60 +458,61 @@ public class QuickTp implements ClientModInitializer {
             if (lastSent == null) {
                 lastSent = new double[]{p.getX(), p.getY(), p.getZ()};
             }
-            for (int i = 0; i < burstPkts && !QUEUE.isEmpty(); i++) {
-                double[] pt = QUEUE.peekFirst();
-                // ===== 档位退档优先（XZ 累计探测失败）：弹回先降档，不急着重规划 =====
-                if (dist3(p.getX(), p.getY(), p.getZ(), lastSent[0], lastSent[1], lastSent[2]) > 26.0) {
-                    if (burstPkts > 1) {
-                        // 累计超限：退一包数档（队列点距不变，pkts=1 即单包95<100 安全）
-                        burstPkts--;
-                        lastSent = null;
-                        showBurstTier(p);
-                        return;
-                    }
-                    if (burstStep > 24.0) {
-                        // 单包就超限（服务器收紧/墙边缘）：减半重规划
-                        burstStep = Math.max(24.0, burstStep / 2);
-                        planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
-                        lastSent = null;
-                        showBurstTier(p);
-                        return;
-                    }
-                // ===== 以下为原有：挡墙绕行处理（最小档才走） =====
-                if (dist3(p.getX(), p.getY(), p.getZ(), lastSent[0], lastSent[1], lastSent[2]) > 26.0) {
-                    bounce++;
-                    if (bounce > 60) {
-                        // 持续重试全是弹回 = 起飞点被完全堵死，别再死磕
-                        reset();
-                        mode = MODE_IDLE;
-                        target = null;
-                        p.sendSystemMessage(Component.literal(L(
-                                "§c[QuickTP] §f起飞点被地形完全堵死，请移动几格后重试",
-                                "§c[QuickTP] §fTakeoff point fully blocked, move a bit and retry")));
-                        return;
-                    }
-                    if (bounce > 4) {
-                        // 连续受阻：起飞点水平偏移（东/南/西/北轮换、距离递增8格）
-                        int k = bounce - 4;
-                        double ox = (k % 4 == 0) ? 8.0 * (k / 4 + 1) : (k % 4 == 1) ? -8.0 * (k / 4 + 1) : 0;
-                        double oz = (k % 4 == 2) ? 8.0 * (k / 4 + 1) : (k % 4 == 3) ? -8.0 * (k / 4 + 1) : 0;
-                        planSprint(p.getX() + ox, p.getY(), p.getZ() + oz, burstStep);
-                        // 提示节流：每 4 次弹回才提醒一次，防止刷屏
-                        if (bounce % 4 == 1) {
-                            String msg = L("§e[QuickTP] §f路径受阻，偏移绕行... §7(第", "§e[QuickTP] §fDetouring... §7(#")
-                                    + (bounce - 4) + L("次)", ")");
-                            p.sendSystemMessage(Component.literal(msg));
-                        }
-                    } else {
-                        planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
-                    }
-                    lastSent = null;   // ← 关键修复：重置锚点，避免下一tick重复误判弹回刷屏
+
+            // ===== 弹回/退档判定（循环外执行：本地=上tick已snap位置，判定才真实）=====
+            if (dist3(p.getX(), p.getY(), p.getZ(), lastSent[0], lastSent[1], lastSent[2]) > 26.0) {
+                // 档位退档优先（XZ 累计探测失败）
+                if (burstPkts > 1) {
+                    burstPkts--;
+                    lastSent = null;
+                    showBurstTier(p);
                     return;
-                    }
                 }
-                lastSent = QUEUE.pollFirst();
-                p.connection.send(new ServerboundMovePlayerPacket.Pos(lastSent[0], lastSent[1], lastSent[2], true, false));
+                if (burstStep > 24.0) {
+                    burstStep = Math.max(24.0, burstStep / 2);
+                    planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
+                    lastSent = null;
+                    showBurstTier(p);
+                    return;
+                }
+                // 最小档仍弹回 = 挡墙 → 偏移绕行
+                bounce++;
+                if (bounce > 60) {
+                    reset();
+                    mode = MODE_IDLE;
+                    target = null;
+                    p.sendSystemMessage(Component.literal(L(
+                            "§c[QuickTP] §f起飞点被地形完全堵死，请移动几格后重试",
+                            "§c[QuickTP] §fTakeoff point fully blocked, move a bit and retry")));
+                    return;
+                }
+                if (bounce > 4) {
+                    int k = bounce - 4;
+                    double ox = (k % 4 == 0) ? 8.0 * (k / 4 + 1) : (k % 4 == 1) ? -8.0 * (k / 4 + 1) : 0;
+                    double oz = (k % 4 == 2) ? 8.0 * (k / 4 + 1) : (k % 4 == 3) ? -8.0 * (k / 4 + 1) : 0;
+                    planSprint(p.getX() + ox, p.getY(), p.getZ() + oz, burstStep);
+                    if (bounce % 4 == 1) {
+                        String msg = L("§e[QuickTP] §f路径受阻，偏移绕行... §7(第", "§e[QuickTP] §fDetouring... §7(#")
+                                + (bounce - 4) + L("次)", ")");
+                        p.sendSystemMessage(Component.literal(msg));
+                    }
+                } else {
+                    planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
+                }
+                lastSent = null;
+                return;
             }
+
+            // ===== 纯发送循环（无判定干扰，发完统一 snap） =====
+            double[] lastPt = null;
+            for (int i = 0; i < burstPkts && !QUEUE.isEmpty(); i++) {
+                lastPt = QUEUE.pollFirst();
+                p.connection.send(new ServerboundMovePlayerPacket.Pos(lastPt[0], lastPt[1], lastPt[2], true, false));
+            }
+            if (lastPt == null) {
+                return;   // 队列意外空（防御）
+            }
+            lastSent = new double[]{lastPt[0], lastPt[1], lastPt[2]};
             p.absSnapTo(lastSent[0], lastSent[1], lastSent[2], p.getYRot(), p.getXRot());
             p.setDeltaMovement(Vec3.ZERO);
             bounce = 0;

@@ -454,6 +454,10 @@ public class QuickTp implements ClientModInitializer {
                 timer = 0;
                 return;
             }
+            // 兜底：退档/重规划后 lastSent 可能为 null → 以当前位置为锚（防 NPE）
+            if (lastSent == null) {
+                lastSent = new double[]{p.getX(), p.getY(), p.getZ()};
+            }
             for (int i = 0; i < burstPkts && !QUEUE.isEmpty(); i++) {
                 double[] pt = QUEUE.peekFirst();
                 // ===== 档位退档优先（XZ 累计探测失败）：弹回先降档，不急着重规划 =====

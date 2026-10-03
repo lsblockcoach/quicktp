@@ -45,7 +45,8 @@ public class QuickTp implements ClientModInitializer {
     private static final int MODE_PROBE = 1;    // 直射（单包直达，仅用于目标区块未加载时）
     private static final int MODE_SPRINT = 2;   // 冲刺（自选步长·保底）
     private static final int MODE_LANDING = 3;  // 落地验证+立稳
-    private static final int MODE_ELYTRA = 4;   // 鞘翅触发等待
+    private static final int MODE_ELYTRA = 4;   // 鞘翅触发等待（保留）
+    private static final int MODE_DROP = 5;     // 单包垂直降（未加载豁免通道）
 
     private static final int PKT = 5;                    // 保留常量（不再直接使用）
     // ===== XZ 档位自适应（BayMcCore 实测：单包XZ上限≈100线性；Y不受限） =====
@@ -68,6 +69,9 @@ public class QuickTp implements ClientModInitializer {
     private static int upTimer = 0;               // 垂直确认计时
     private static int confirmWait = 0;           // 队列发完后的服务器确认窗
     private static double[] landedSnap = null;    // LANDING 每次 snap 的位置（用于弹回检测）
+    private static double dropDy = 0;             // 单包降的下降量（弹回时用于抵消清账）
+    private static int dropWait = 0;              // 单包降观察计时
+    private static boolean f12Prev = false;       // F12 GLFW 边沿检测
     private static final ArrayDeque<double[]> QUEUE = new ArrayDeque<>();
     private static double[] target = null;       // 目标{x,y,z}
     private static double[] lastSent = null;
@@ -217,7 +221,11 @@ public class QuickTp implements ClientModInitializer {
             return;
         }
 
-        while (STOP_KEY.consumeClick()) {
+        // F12：原生 GLFW 键盘轮询（26.x KeyMapping.consumeClick 对自定义键位失效 → 改底层轮询）
+        boolean f12Down = org.lwjgl.glfw.GLFW.glfwGetKey(
+                org.lwjgl.glfw.GLFW.glfwGetCurrentContext(), org.lwjgl.glfw.GLFW.GLFW_KEY_F12)
+                == org.lwjgl.glfw.GLFW.GLFW_PRESS;
+        if (f12Down && !f12Prev) {
             if (mode != MODE_IDLE) {
                 reset();
                 mode = MODE_IDLE;
@@ -226,8 +234,8 @@ public class QuickTp implements ClientModInitializer {
                         "§c[QuickTP] §f传送已取消（F12）",
                         "§c[QuickTP] §fTeleport cancelled (F12)")));
             }
-            return;
         }
+        f12Prev = f12Down;
 
         if (mode == MODE_IDLE) {
             if (noFall) tickNoFall(p);
@@ -238,24 +246,53 @@ public class QuickTp implements ClientModInitializer {
         if (mode == MODE_PROBE) {
             if (++timer > 8) {      // 8tick 后进入落地阶段
                 if (needDescent && target != null) {
-                    // 直射到"起点等高"处 → 碎步下降（每步3.9 onGround结算0伤）
+                    // ===== 单包垂直降：Y 轴不受检 + 目标未加载豁免摔落结算（两次 doCheckFallDamage 都 return，账为 0）=====
                     double hopY = Math.max(target[1], p.getY());
-                    // 关键：本地同步到直射点！否则 SPRINT 保险丝第一 tick 就
-                    // 把"本地在起点 vs lastSent=直射点"误判为弹回 → 放弃直射全程447冲刺。
-                    // 同步后：直射真被弹回 → 弹回包会把本地拉回起点 → 保险丝正确转冲刺；
-                    // 直射成功 → 本地在直射点无弹回 → 碎步正常执行（瞬间到达体验）
                     p.absSnapTo(target[0], hopY, target[2], p.getYRot(), p.getXRot());
                     p.setDeltaMovement(Vec3.ZERO);
-                    mode = MODE_SPRINT;
-                    QUEUE.clear();
-                    lastSent = new double[]{target[0], hopY, target[2]};
-                    segment(target[0], hopY, target[2],
-                            target[0], target[1], target[2], 7.0);
+                    // 单包下降（onGround=false：被弹回时只挂账不摔死，稍后对称上升抵消）
+                    p.connection.send(new ServerboundMovePlayerPacket.Pos(
+                            target[0], target[1], target[2], false, false));
+                    p.absSnapTo(target[0], target[1], target[2], p.getYRot(), p.getXRot());
+                    p.setDeltaMovement(Vec3.ZERO);
+                    dropDy = hopY - target[1];
+                    dropWait = 0;
+                    mode = MODE_DROP;
+                    lastSent = new double[]{target[0], target[1], target[2]};
                 } else {
                     mode = MODE_LANDING;
                 }
                 timer = 0;
             }
+            return;
+
+        }
+
+        // ---------- 单包垂直降观察：4tick 无弹回 = 成功（豁免账 0，落定零伤） ----------
+        if (mode == MODE_DROP) {
+            if (++dropWait <= 4) {
+                return;
+            }
+            double dev = dist3(p.getX(), p.getY(), p.getZ(),
+                    lastSent[0], lastSent[1], lastSent[2]);
+            if (dev > 12.0) {
+                // ===== 弹回（穿山）：对称上升包把 fallDistance 抵消到 0，再走碎步 =====
+                double safeY = p.getY() + dropDy;
+                p.connection.send(new ServerboundMovePlayerPacket.Pos(
+                        p.getX(), safeY, p.getZ(), false, false));
+                p.absSnapTo(p.getX(), safeY, p.getZ(), p.getYRot(), p.getXRot());
+                p.setDeltaMovement(Vec3.ZERO);
+                mode = MODE_SPRINT;
+                lastSent = null;
+                QUEUE.clear();
+                planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
+                p.sendSystemMessage(Component.literal(L(
+                        "§e[QuickTP] §f单包降被阻挡（穿山），已清账改碎步下降",
+                        "§e[QuickTP] §fDirect drop blocked (terrain), cleared & step-down")));
+                return;
+            }
+            mode = MODE_LANDING;
+            timer = 0;
             return;
         }
 

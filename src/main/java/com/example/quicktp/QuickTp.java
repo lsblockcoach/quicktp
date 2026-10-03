@@ -63,6 +63,7 @@ public class QuickTp implements ClientModInitializer {
     private static int upState = 0;               // 垂直大包状态: 0=未测 1=确认中 2=启用 -1=禁用
     private static int upTimer = 0;               // 垂直确认计时
     private static int confirmWait = 0;           // 队列发完后的服务器确认窗
+    private static double[] landedSnap = null;    // LANDING 每次 snap 的位置（用于弹回检测）
     private static final ArrayDeque<double[]> QUEUE = new ArrayDeque<>();
     private static double[] target = null;       // 目标{x,y,z}
     private static double[] lastSent = null;
@@ -199,6 +200,7 @@ public class QuickTp implements ClientModInitializer {
         lastSent = null;
         timer = 0;
         confirmWait = 0;
+        landedSnap = null;
     }
 
     // ============================================================ 主循环
@@ -248,6 +250,23 @@ public class QuickTp implements ClientModInitializer {
 
         // ---------- C. 落地验证 + 立稳（成败=目标区块是否到来） ----------
         if (mode == MODE_LANDING) {
+            // ===== 弹回检测（假到达根因修复）：本地位置被服务器拉走 = 没到！ =====
+            // 定位包每 tick 试图钉在目标，服务器没接受时会反复弹回；
+            // 一旦检测到弹回（本地偏离上一次 snap），立刻撤退转冲刺继续赶路，
+            // 绝不用被污染的位置做“到达”判定。
+            if (landedSnap != null && dist3(p.getX(), p.getY(), p.getZ(),
+                    landedSnap[0], landedSnap[1], landedSnap[2]) > 8.0) {
+                p.sendSystemMessage(Component.literal(L(
+                        "§e[QuickTP] §f服务器未认可落点（弹回），继续赶路...",
+                        "§e[QuickTP] §fServer rejected landing, continuing...")));
+                mode = MODE_SPRINT;
+                timer = 0;
+                lastSent = null;
+                landedSnap = null;
+                QUEUE.clear();
+                planSprint(p.getX(), p.getY(), p.getZ(), elytraActive ? 7.7 : 4.44);
+                return;
+            }
             double sy = surfaceY(target[0], target[2]);
             boolean got = sy > 1 && chunkLoaded(target[0], target[2]);
             double far = dist3(target[0], target[1], target[2],
@@ -297,6 +316,7 @@ public class QuickTp implements ClientModInitializer {
             }
             p.absSnapTo(target[0], target[1], target[2], p.getYRot(), p.getXRot());
             p.setDeltaMovement(Vec3.ZERO);
+            landedSnap = new double[]{target[0], target[1], target[2]};
             lastSent = null;
             if (got && ++timer > 12) {            // 区块到位后立稳 12tick 收尾
                 mode = MODE_IDLE;
@@ -366,7 +386,7 @@ public class QuickTp implements ClientModInitializer {
             if (QUEUE.isEmpty()) {
                 // ===== 服务器确认窗（防假到达）：6 tick 内不发包、不snap =====
                 // 让迟到的弹回包把本地位置拉回原形——没被弹回才算真到达
-                if (lastSent != null && confirmWait++ < 6) {
+                if (lastSent != null && confirmWait++ < 10) {
                     return;
                 }
                 confirmWait = 0;

@@ -72,6 +72,8 @@ public class QuickTp implements ClientModInitializer {
     private static double dropDy = 0;             // 单包降的下降量（弹回时用于抵消清账）
     private static int dropWait = 0;              // 单包降观察计时
     private static boolean f12Prev = false;       // F12 GLFW 边沿检测
+    private static double directY = 0;            // 直射点高度（水平大包）
+    private static int dropRetries = 0;           // 直射重试计数（撞检查失效窗口）
     private static final ArrayDeque<double[]> QUEUE = new ArrayDeque<>();
     private static double[] target = null;       // 目标{x,y,z}
     private static double[] lastSent = null;
@@ -171,10 +173,11 @@ public class QuickTp implements ClientModInitializer {
             // 关键：直射包 y 绝不下降（ya>=0）——否则被弹回时 doCheckFallDamage
             // 会结算巨量 fallDistance 直接把玩家摔死（"直射失败=退出"的元凶）！
             // 目标低于起点 → 直射到"起点等高"（水平，弹回零风险）→ 再碎步下降。
-            double directY = Math.max(landY, p.getY());
+            directY = Math.max(landY, p.getY());
             needDescent = directY > landY + 0.5;
             mode = MODE_PROBE;
             timer = 0;
+            dropRetries = 0;
             lastSent = new double[]{tx, directY, tz};
             p.connection.send(new ServerboundMovePlayerPacket.Pos(tx, directY, tz, true, false));
             src.sendFeedback(Component.literal(String.format(
@@ -184,21 +187,17 @@ public class QuickTp implements ClientModInitializer {
             return 1;
         }
 
-        // ===== 目标区块已加载 → 水平直射到目标上空 + 碎步降落 =====
-        // 水平大包 ya≈0 → 摔落距离零增长（无论服务器检查开不开都不摔）；
-        // 撞上检查失效窗口=瞬间到上空+碎步落地；被弹回→SPRINT弹回保险丝自动转冲刺（自愈）
-        mode = MODE_SPRINT;
+        // ===== 目标区块已加载 → 水平直射（统一 PROBE 流程：失败重试撞检查失效窗口） =====
+        directY = Math.max(p.getY(), landY) + 8.0;   // 水平大包（ya≈0 零摔落风险）
+        needDescent = true;
+        mode = MODE_PROBE;
         timer = 0;
-        double hopY = Math.max(p.getY(), landY) + 8.0;
-        lastSent = new double[]{tx, hopY, tz};
-        p.connection.send(new ServerboundMovePlayerPacket.Pos(tx, hopY, tz, true, false));
-        p.absSnapTo(tx, hopY, tz, p.getYRot(), p.getXRot());
-        p.setDeltaMovement(Vec3.ZERO);
-        QUEUE.clear();
-        segment(tx, hopY, tz, tx, landY, tz, 7.0);   // 下降碎步（内部自动3.9格防摔）
+        dropRetries = 0;
+        lastSent = new double[]{tx, directY, tz};
+        p.connection.send(new ServerboundMovePlayerPacket.Pos(tx, directY, tz, true, false));
         src.sendFeedback(Component.literal(String.format(
-                L("§a[QuickTP] §f已加载区域 → 水平直射尝试 %.0f格%s §8[F12取消]",
-                  "§a[QuickTP] §fLoaded area → horizontal direct shot %.0f blocks%s §8[F12 cancel]"),
+                L("§a[QuickTP] §f水平直射尝试 %.0f格%s §8[F12取消]",
+                  "§a[QuickTP] §fHorizontal direct shot %.0f blocks%s §8[F12 cancel]"),
                 dist, elytraEligible ? L(" §a(鞘翅已备)", " §a(elytra ready)") : "")));
         return 1;
     }
@@ -209,6 +208,7 @@ public class QuickTp implements ClientModInitializer {
         timer = 0;
         confirmWait = 0;
         landedSnap = null;
+        dropRetries = 0;
     }
 
     // ============================================================ 主循环
@@ -246,16 +246,15 @@ public class QuickTp implements ClientModInitializer {
         if (mode == MODE_PROBE) {
             if (++timer > 8) {      // 8tick 后进入落地阶段
                 if (needDescent && target != null) {
-                    // ===== 单包垂直降：Y 轴不受检 + 目标未加载豁免摔落结算（两次 doCheckFallDamage 都 return，账为 0）=====
-                    double hopY = Math.max(target[1], p.getY());
-                    p.absSnapTo(target[0], hopY, target[2], p.getYRot(), p.getXRot());
+                    // ===== 单包垂直降：Y 轴不受检 + 目标未加载豁免摔落结算 =====
+                    p.absSnapTo(target[0], directY, target[2], p.getYRot(), p.getXRot());
                     p.setDeltaMovement(Vec3.ZERO);
                     // 单包下降（onGround=false：被弹回时只挂账不摔死，稍后对称上升抵消）
                     p.connection.send(new ServerboundMovePlayerPacket.Pos(
                             target[0], target[1], target[2], false, false));
                     p.absSnapTo(target[0], target[1], target[2], p.getYRot(), p.getXRot());
                     p.setDeltaMovement(Vec3.ZERO);
-                    dropDy = hopY - target[1];
+                    dropDy = directY - target[1];
                     dropWait = 0;
                     mode = MODE_DROP;
                     lastSent = new double[]{target[0], target[1], target[2]};
@@ -276,19 +275,32 @@ public class QuickTp implements ClientModInitializer {
             double dev = dist3(p.getX(), p.getY(), p.getZ(),
                     lastSent[0], lastSent[1], lastSent[2]);
             if (dev > 12.0) {
-                // ===== 弹回（穿山）：对称上升包把 fallDistance 抵消到 0，再走碎步 =====
+                // ===== 直射被弹回 → 对称上升清账 + 重发直射重试（撞服务器检查失效窗口） =====
                 double safeY = p.getY() + dropDy;
                 p.connection.send(new ServerboundMovePlayerPacket.Pos(
                         p.getX(), safeY, p.getZ(), false, false));
                 p.absSnapTo(p.getX(), safeY, p.getZ(), p.getYRot(), p.getXRot());
                 p.setDeltaMovement(Vec3.ZERO);
+                if (++dropRetries < 8) {
+                    // 重发水平直射包 → 回 PROBE 观察（每轮约 0.65 秒，共 8 轮撞窗口）
+                    mode = MODE_PROBE;
+                    timer = 0;
+                    dropWait = 0;
+                    double sx = p.getX();
+                    p.connection.send(new ServerboundMovePlayerPacket.Pos(
+                            target[0], directY, target[2], true, false));
+                    lastSent = new double[]{target[0], directY, target[2]};
+                    return;
+                }
+                // 8 轮全失败 = 服务器检查稳定开启 → 冲刺赶路
                 mode = MODE_SPRINT;
                 lastSent = null;
                 QUEUE.clear();
                 planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
-                p.sendSystemMessage(Component.literal(L(
-                        "§e[QuickTP] §f单包降被阻挡（穿山），已清账改碎步下降",
-                        "§e[QuickTP] §fDirect drop blocked (terrain), cleared & step-down")));
+                p.sendSystemMessage(Component.literal(String.format(L(
+                        "§c[QuickTP] §f直射被拦截(已试8次) → 冲刺赶路 §7(%.0f格)",
+                        "§c[QuickTP] §fDirect shot blocked (8 tries) → sprinting §7(%.0f blocks)"),
+                        dist3(p.getX(), p.getY(), p.getZ(), target[0], target[1], target[2]))));
                 return;
             }
             mode = MODE_LANDING;
@@ -517,11 +529,18 @@ public class QuickTp implements ClientModInitializer {
             p.setDeltaMovement(Vec3.ZERO);
             bounce = 0;
 
-            // ===== 档位升档：连续稳定 15 tick → 每 tick 包数 +1（累计位移探测） =====
-            if (++stableTicks >= 15 && burstPkts < 10) {
-                burstPkts++;
+            // ===== 档位升档：稳定后优先恢复步长，步长满再加包数（防止退档锁死龟速） =====
+            if (++stableTicks >= 10) {
                 stableTicks = 0;
-                showBurstTier(p);
+                if (burstStep < 95.0) {
+                    burstStep = Math.min(95.0, burstStep + 20.0);   // 步长回升
+                    planSprint(p.getX(), p.getY(), p.getZ(), burstStep);
+                    lastSent = null;
+                    showBurstTier(p);
+                } else if (burstPkts < 10) {
+                    burstPkts++;                                     // 包数探测
+                    showBurstTier(p);
+                }
             }
         }
     }
